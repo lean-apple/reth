@@ -21,8 +21,8 @@ use reth_execution_types::ChangedAccount;
 use reth_primitives::{
     kzg::KzgSettings,
     transaction::{SignedTransactionIntoRecoveredExt, TryFromRecoveredTransactionError},
-    PooledTransactionsElement, PooledTransactionsElementEcRecovered, RecoveredTx, SealedBlock,
-    Transaction, TransactionSigned,
+    Block, PooledTransactionsElement, PooledTransactionsElementEcRecovered, RecoveredTx,
+    SealedBlock, Transaction, TransactionSigned,
 };
 use reth_primitives_traits::SignedTransaction;
 #[cfg(feature = "serde")]
@@ -717,9 +717,9 @@ pub enum PoolUpdateKind {
 ///
 /// This is used to update the pool state accordingly.
 #[derive(Clone, Debug)]
-pub struct CanonicalStateUpdate<'a> {
+pub struct CanonicalStateUpdate<'a, B = Block> {
     /// Hash of the tip block.
-    pub new_tip: &'a SealedBlock,
+    pub new_tip: &'a SealedBlock<B>,
     /// EIP-1559 Base fee of the _next_ (pending) block
     ///
     /// The base fee of a block depends on the utilization of the last block and its base fee.
