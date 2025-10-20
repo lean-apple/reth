@@ -45,6 +45,7 @@ const CONTENTS_1: &[u8; 1] = b"b";
     ];
     "With one invalid checksum partially fails"
 )]
+
 #[test_case::test_case(
     Err::<&str, _>("Missing file `checksums.txt` in the `dir`"),
     [
@@ -55,6 +56,7 @@ const CONTENTS_1: &[u8; 1] = b"b";
     ];
     "With missing checksums file fails"
 )]
+
 #[tokio::test]
 async fn test_streaming_from_local_directory(
     checksums: Result<impl AsRef<[u8]>, &str>,

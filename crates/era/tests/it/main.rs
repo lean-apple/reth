@@ -124,7 +124,6 @@ impl Era1TestDownloader {
 
         let folder = self.temp_dir.path();
 
-        // set up the client
         let client = EraClient::new(Client::new(), final_url, folder);
 
         // set up the file list, required before we can download files
