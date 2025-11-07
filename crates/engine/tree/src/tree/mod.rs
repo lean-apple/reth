@@ -944,7 +944,7 @@ where
             }
             // We already passed the canonical head
             if current_block.block.number <= canonical_head.number {
-                break;
+                break
             }
             current_hash = current_block.parent;
 
