@@ -940,7 +940,7 @@ where
 
         loop {
             if current_block.block.hash == canonical_head.hash {
-                return Ok(false);
+                return Ok(false)
             }
             // We already passed the canonical head
             if current_block.block.number <= canonical_head.number {
