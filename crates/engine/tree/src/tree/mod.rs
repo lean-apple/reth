@@ -924,36 +924,6 @@ where
         Ok(())
     }
 
-    /// Determines if the given block is part of a fork by checking that these
-    /// conditions are true:
-    /// * walking back from the target hash to verify that the target hash is not part of an
-    ///   extension of the canonical chain.
-    /// * walking back from the current head to verify that the target hash is not already part of
-    ///   the canonical chain.
-    ///
-    /// The header is required as an arg, because we might be checking that the header is a fork
-    /// block before it's in the tree state and before it's in the database.
-    fn is_fork(&self, target: BlockWithParent) -> ProviderResult<bool> {
-        let canonical_head = self.state.tree_state.canonical_head();
-        let mut current_hash;
-        let mut current_block = target;
-
-        loop {
-            if current_block.block.hash == canonical_head.hash {
-                return Ok(false)
-            }
-            // We already passed the canonical head
-            if current_block.block.number <= canonical_head.number {
-                break
-            }
-            current_hash = current_block.parent;
-
-            let Some(next_block) = self.sealed_header_by_hash(current_hash)? else { break };
-            current_block = next_block.block_with_parent();
-        }
-
-        Ok(true)
-    }
     /// Invoked when we receive a new forkchoice update message. Calls into the blockchain tree
     /// to resolve chain forks and ensure that the Execution Layer is working with the latest valid
     /// chain.
@@ -2493,7 +2463,8 @@ where
         // emit insert event
         let elapsed = start.elapsed();
 
-        let is_fork = self.is_fork(executed.recovered_block().block_with_parent()).unwrap_or(false);
+        let is_fork = executed.recovered_block().parent_hash() !=
+            self.state.tree_state.canonical_block_hash();
         let engine_event = if is_fork {
             ConsensusEngineEvent::ForkBlockAdded(executed, elapsed)
         } else {
