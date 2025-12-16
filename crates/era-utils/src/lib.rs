@@ -3,5 +3,5 @@
 //!
 //! The import is downloaded using [`reth_era_downloader`] and parsed using [`reth_era`].
 
-pub mod era1;
 pub mod era;
+pub mod era1;

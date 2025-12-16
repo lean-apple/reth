@@ -1,8 +1,8 @@
 use reth_db_common::init::init_genesis;
+use reth_era_utils::era1::{export, ExportConfig};
 use reth_fs_util as fs;
 use reth_provider::{test_utils::create_test_provider_factory, BlockReader};
 use tempfile::tempdir;
-use reth_era_utils::era1::{ExportConfig, export};
 
 #[test]
 fn test_export_with_genesis_only() {
