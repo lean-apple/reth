@@ -1,7 +1,7 @@
 //! Logic to export from database era1 block history
 //! and injecting them into era1 files with `Era1Writer`.
 
-use crate::calculate_td_by_number;
+use crate::era1::history::calculate_td_by_number;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{BlockNumber, B256, U256};
 use eyre::{eyre, Result};
@@ -315,7 +315,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::ExportConfig;
+    use crate::era1::export::ExportConfig;
     use reth_era::era1::types::execution::MAX_BLOCKS_PER_ERA1;
     use tempfile::tempdir;
 
