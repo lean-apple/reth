@@ -7,7 +7,7 @@ use reqwest::{Client, Url};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_era_downloader::{read_dir, EraClient, EraStream, EraStreamConfig};
-use reth_era_utils as era;
+use reth_era_utils::era1::history as era1_history;
 use reth_etl::Collector;
 use reth_fs_util as fs;
 use reth_node_core::version::version_metadata;
@@ -83,7 +83,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ImportEraC
         if let Some(path) = self.import.path {
             let stream = read_dir(path, next_block)?;
 
-            era::import(stream, &provider_factory, &mut hash_collector)?;
+            era1_history::import(stream, &provider_factory, &mut hash_collector)?;
         } else {
             let url = match self.import.url {
                 Some(url) => url,
@@ -98,7 +98,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> ImportEraC
             let client = EraClient::new(Client::new(), url, folder);
             let stream = EraStream::new(client, config);
 
-            era::import(stream, &provider_factory, &mut hash_collector)?;
+            era1_history::import(stream, &provider_factory, &mut hash_collector)?;
         }
 
         Ok(())

@@ -6,7 +6,7 @@ use reth_config::config::EtlConfig;
 use reth_db_api::{table::Value, transaction::DbTxMut};
 use reth_era::{common::file_ops::StreamReader, era1::file::Era1Reader};
 use reth_era_downloader::{read_dir, EraClient, EraMeta, EraStream, EraStreamConfig};
-use reth_era_utils as era;
+use reth_era_utils::era1::history as era1_history;
 use reth_etl::Collector;
 use reth_primitives_traits::{FullBlockBody, FullBlockHeader, NodePrimitives};
 use reth_provider::{
@@ -88,7 +88,7 @@ impl EraImportSource {
                 let file = reth_fs_util::open(meta.path())?;
                 let reader = Era1Reader::new(file);
                 let iter = reader.iter();
-                let iter = iter.map(era::decode);
+                let iter = iter.map(era1_history::decode);
                 let iter = iter.chain(
                     iter::once_with(move || match meta.mark_as_processed() {
                         Ok(..) => None,
@@ -179,7 +179,7 @@ where
             // ascending order
             let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers)?;
 
-            let height = era::process_iter(
+            let height = era1_history::process_iter(
                 era,
                 &mut writer,
                 provider,
@@ -189,12 +189,12 @@ where
             .map_err(|e| StageError::Fatal(e.into()))?;
 
             if !self.hash_collector.is_empty() {
-                era::build_index(provider, &mut self.hash_collector)
+                era1_history::build_index(provider, &mut self.hash_collector)
                     .map_err(|e| StageError::Recoverable(e.into()))?;
                 self.hash_collector.clear();
             }
 
-            era::save_stage_checkpoints(
+            era1_history::save_stage_checkpoints(
                 &provider,
                 input.checkpoint().block_number,
                 height,
