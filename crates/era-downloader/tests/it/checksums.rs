@@ -7,9 +7,7 @@ use std::str::FromStr;
 use tempfile::tempdir;
 use test_case::test_case;
 
-#[test_case("https://mainnet.era1.nimbus.team/"; "nimbus")]
-#[test_case("https://era1.ethportal.net/"; "ethportal")]
-#[test_case("https://era.ithaca.xyz/era1/index.html"; "ithaca")]
+#[test_case("https://data.ethpandaops.io/erae/mainnet/"; "ethpandaops")]
 #[tokio::test]
 async fn test_invalid_checksum_returns_error(url: &str) {
     let base_url = Url::from_str(url).unwrap();
@@ -27,7 +25,7 @@ async fn test_invalid_checksum_returns_error(url: &str) {
         "Checksum mismatch, \
 got: 87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7, \
 expected: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-for mainnet-00000-5ec1ffb8.era1 at {}/mainnet-00000-5ec1ffb8.era1",
+for mainnet-00000-a6860fef.erae at {}/mainnet-00000-a6860fef.erae",
         folder.display()
     );
 
@@ -38,7 +36,7 @@ for mainnet-00000-5ec1ffb8.era1 at {}/mainnet-00000-5ec1ffb8.era1",
         "Checksum mismatch, \
 got: 0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f, \
 expected: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-for mainnet-00001-a5364e9a.era1 at {}/mainnet-00001-a5364e9a.era1",
+for mainnet-00001-05c64fc4.erae at {}/mainnet-00001-05c64fc4.erae",
         folder.display()
     );
 
@@ -61,21 +59,18 @@ impl HttpClient for FailingClient {
         let url = url.into_url().unwrap();
 
         Ok(futures::stream::iter(vec![Ok(match url.as_str() {
-            "https://mainnet.era1.nimbus.team/" => Bytes::from_static(crate::ERA1_NIMBUS),
-            "https://era1.ethportal.net/" => Bytes::from_static(crate::ERA1_ETH_PORTAL),
-            "https://era.ithaca.xyz/era1/index.html" => Bytes::from_static(crate::ERA1_ITHACA),
-            "https://mainnet.era1.nimbus.team/checksums.txt" |
-            "https://era1.ethportal.net/checksums.txt" |
-            "https://era.ithaca.xyz/era1/checksums.txt" => Bytes::from_static(CHECKSUMS),
-            "https://era1.ethportal.net/mainnet-00000-5ec1ffb8.era1" |
-            "https://mainnet.era1.nimbus.team/mainnet-00000-5ec1ffb8.era1" |
-            "https://era.ithaca.xyz/era1/mainnet-00000-5ec1ffb8.era1" => {
-                Bytes::from_static(crate::ERA1_MAINNET_0)
+            "https://data.ethpandaops.io/erae/mainnet/" |
+            "https://data.ethpandaops.io/erae/mainnet/index.html" => {
+                Bytes::from_static(crate::ERAE_ETHPANDAOPS)
             }
-            "https://era1.ethportal.net/mainnet-00001-a5364e9a.era1" |
-            "https://mainnet.era1.nimbus.team/mainnet-00001-a5364e9a.era1" |
-            "https://era.ithaca.xyz/era1/mainnet-00001-a5364e9a.era1" => {
-                Bytes::from_static(crate::ERA1_MAINNET_1)
+            "https://data.ethpandaops.io/erae/mainnet/checksums.txt" => {
+                Bytes::from_static(CHECKSUMS)
+            }
+            "https://data.ethpandaops.io/erae/mainnet/mainnet-00000-a6860fef.erae" => {
+                Bytes::from_static(crate::ERAE_MAINNET_0)
+            }
+            "https://data.ethpandaops.io/erae/mainnet/mainnet-00001-05c64fc4.erae" => {
+                Bytes::from_static(crate::ERAE_MAINNET_1)
             }
             v => unimplemented!("Unexpected URL \"{v}\""),
         })]))

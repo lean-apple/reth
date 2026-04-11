@@ -14,8 +14,8 @@ const CONTENTS_1: &[u8; 1] = b"b";
         sha2::Sha256::digest(CONTENTS_1).encode_hex()
     )),
     [
-        Ok("mainnet-00000-5ec1ffb8.era1"),
-        Ok("mainnet-00001-a5364e9a.era1"),
+        Ok("mainnet-00000-a6860fef.erae"),
+        Ok("mainnet-00001-05c64fc4.erae"),
     ];
     "Reads all files successfully"
 )]
@@ -41,7 +41,7 @@ const CONTENTS_1: &[u8; 1] = b"b";
         Err("Checksum mismatch, \
             got: ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb, \
             expected: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        Ok("mainnet-00001-a5364e9a.era1"),
+        Ok("mainnet-00001-05c64fc4.erae"),
     ];
     "With one invalid checksum partially fails"
 )]
@@ -51,7 +51,7 @@ const CONTENTS_1: &[u8; 1] = b"b";
         Err("Checksum mismatch, \
             got: ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb, \
             expected: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        Ok("mainnet-00001-a5364e9a.era1"),
+        Ok("mainnet-00001-05c64fc4.erae"),
     ];
     "With missing checksums file fails"
 )]
@@ -66,8 +66,8 @@ async fn test_streaming_from_local_directory(
     if let Ok(checksums) = &checksums {
         fs::write(folder.join("checksums.txt"), checksums).await.unwrap();
     }
-    fs::write(folder.join("mainnet-00000-5ec1ffb8.era1"), CONTENTS_0).await.unwrap();
-    fs::write(folder.join("mainnet-00001-a5364e9a.era1"), CONTENTS_1).await.unwrap();
+    fs::write(folder.join("mainnet-00000-a6860fef.erae"), CONTENTS_0).await.unwrap();
+    fs::write(folder.join("mainnet-00001-05c64fc4.erae"), CONTENTS_1).await.unwrap();
 
     let folder = folder.into_boxed_path();
     let actual = read_dir(folder.clone(), 0);

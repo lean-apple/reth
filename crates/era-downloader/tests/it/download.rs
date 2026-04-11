@@ -6,11 +6,9 @@ use std::str::FromStr;
 use tempfile::tempdir;
 use test_case::test_case;
 
-#[test_case("https://mainnet.era1.nimbus.team/"; "nimbus")]
-#[test_case("https://era1.ethportal.net/"; "ethportal")]
-#[test_case("https://era.ithaca.xyz/era1/index.html"; "ithaca")]
+#[test_case("https://data.ethpandaops.io/erae/mainnet/"; "ethpandaops")]
 #[tokio::test]
-async fn test_getting_era1_file_url_after_fetching_file_list(url: &str) {
+async fn test_getting_erae_file_url_after_fetching_file_list(url: &str) {
     let base_url = Url::from_str(url).unwrap();
     let folder = tempdir().unwrap();
     let folder = folder.path();
@@ -18,15 +16,13 @@ async fn test_getting_era1_file_url_after_fetching_file_list(url: &str) {
 
     client.fetch_file_list().await.unwrap();
 
-    let expected_url = Some(base_url.join("mainnet-00000-5ec1ffb8.era1").unwrap());
+    let expected_url = Some(base_url.join("mainnet-00000-a6860fef.erae").unwrap());
     let actual_url = client.url(0).await.unwrap();
 
     assert_eq!(actual_url, expected_url);
 }
 
-#[test_case("https://mainnet.era1.nimbus.team/"; "nimbus")]
-#[test_case("https://era1.ethportal.net/"; "ethportal")]
-#[test_case("https://era.ithaca.xyz/era1/index.html"; "ithaca")]
+#[test_case("https://data.ethpandaops.io/erae/mainnet/"; "ethpandaops")]
 #[tokio::test]
 async fn test_getting_file_after_fetching_file_list(url: &str) {
     let base_url = Url::from_str(url).unwrap();

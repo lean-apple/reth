@@ -6,11 +6,9 @@ use std::str::FromStr;
 use tempfile::tempdir;
 use test_case::test_case;
 
-#[test_case("https://mainnet.era1.nimbus.team/"; "nimbus")]
-#[test_case("https://era1.ethportal.net/"; "ethportal")]
-#[test_case("https://era.ithaca.xyz/era1/index.html"; "ithaca")]
+#[test_case("https://data.ethpandaops.io/erae/mainnet/"; "ethpandaops")]
 #[tokio::test]
-async fn test_getting_era1_file_name_after_fetching_file_list(url: &str) {
+async fn test_getting_erae_file_name_after_fetching_file_list(url: &str) {
     let url = Url::from_str(url).unwrap();
     let folder = tempdir().unwrap();
     let folder = folder.path();
@@ -19,7 +17,7 @@ async fn test_getting_era1_file_name_after_fetching_file_list(url: &str) {
     client.fetch_file_list().await.unwrap();
 
     let actual = client.number_to_file_name(600).await.unwrap();
-    let expected = Some("mainnet-00600-a81ae85f.era1".to_owned());
+    let expected = Some("mainnet-00600-49dc8d1d.erae".to_owned());
 
     assert_eq!(actual, expected);
 }

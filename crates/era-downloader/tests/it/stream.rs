@@ -7,9 +7,7 @@ use std::str::FromStr;
 use tempfile::tempdir;
 use test_case::test_case;
 
-#[test_case("https://mainnet.era1.nimbus.team/"; "nimbus")]
-#[test_case("https://era1.ethportal.net/"; "ethportal")]
-#[test_case("https://era.ithaca.xyz/era1/index.html"; "ithaca")]
+#[test_case("https://data.ethpandaops.io/erae/mainnet/"; "ethpandaops")]
 #[tokio::test]
 async fn test_streaming_files_after_fetching_file_list(url: &str) {
     let base_url = Url::from_str(url).unwrap();
@@ -22,20 +20,21 @@ async fn test_streaming_files_after_fetching_file_list(url: &str) {
         EraStreamConfig::default().with_max_files(2).with_max_concurrent_downloads(1),
     );
 
-    let expected_file = folder.join("mainnet-00000-5ec1ffb8.era1").into_boxed_path();
+    let expected_file = folder.join("mainnet-00000-a6860fef.erae").into_boxed_path();
     let actual_file = stream.next().await.unwrap().unwrap();
 
     assert_eq!(actual_file.as_ref(), expected_file.as_ref());
 
-    let expected_file = folder.join("mainnet-00001-a5364e9a.era1").into_boxed_path();
+    let expected_file = folder.join("mainnet-00001-05c64fc4.erae").into_boxed_path();
     let actual_file = stream.next().await.unwrap().unwrap();
 
     assert_eq!(actual_file.as_ref(), expected_file.as_ref());
 }
 
 #[tokio::test]
-async fn test_streaming_era1_files_after_fetching_file_list_into_missing_folder_fails() {
-    let base_url = Url::from_str("https://era.ithaca.xyz/era1/index.html").unwrap();
+async fn test_streaming_erae_files_after_fetching_file_list_into_missing_folder_fails() {
+    let base_url =
+        Url::from_str("https://data.ethpandaops.io/erae/mainnet/").unwrap();
     let folder = tempdir().unwrap().path().to_owned();
     let client = EraClient::new(StubClient, base_url, folder);
 
@@ -52,7 +51,7 @@ async fn test_streaming_era1_files_after_fetching_file_list_into_missing_folder_
 
 #[tokio::test]
 async fn test_streaming_era_files_after_fetching_file_list_into_missing_folder_fails() {
-    let base_url = Url::from_str("https://mainnet.era.nimbus.team").unwrap(); //TODO: change once ithaca host era files
+     let base_url = Url::from_str("https://mainnet.era.nimbus.team").unwrap(); //TODO: change once ithaca host era files
     let folder = tempdir().unwrap().path().to_owned();
     let client = EraClient::new(StubClient, base_url, folder);
 
