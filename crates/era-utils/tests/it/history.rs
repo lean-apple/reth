@@ -1,7 +1,7 @@
 use crate::{ClientWithFakeIndex, ITHACA_ERA_INDEX_URL};
 use reqwest::{Client, Url};
 use reth_db_common::init::init_genesis;
-use reth_era::era1::types::execution::MAX_BLOCKS_PER_ERA1;
+use reth_era::erae::types::execution::MAX_BLOCKS_PER_ERAE;
 use reth_era_downloader::{EraClient, EraStream, EraStreamConfig};
 use reth_era_utils::{export, import, ExportConfig};
 use reth_etl::Collector;
@@ -17,10 +17,10 @@ const EXPORT_LAST_BLOCK: u64 = EXPORT_FIRST_BLOCK + EXPORT_TOTAL_BLOCKS - 1;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_history_imports_from_fresh_state_successfully() {
-    // URL where the ERA1 files are hosted
+    // URL where the ERAE files are hosted
     let url = Url::from_str(ITHACA_ERA_INDEX_URL).unwrap();
 
-    // Directory where the ERA1 files will be downloaded to
+    // Directory where the ERAE files will be downloaded to
     let folder = tempdir().unwrap();
     let folder = folder.path();
 
@@ -43,14 +43,14 @@ async fn test_history_imports_from_fresh_state_successfully() {
     assert_eq!(actual_block_number, expected_block_number);
 }
 
-/// Test that verifies the complete roundtrip from importing to exporting era1 files.
+/// Test that verifies the complete roundtrip from importing to exporting erae files.
 /// It validates :
-/// - Downloads the first era1 file from ithaca's url and import the file data, into the database
-/// - Exports blocks from database back to era1 format
+/// - Downloads the first erae file from ithaca's url and import the file data, into the database
+/// - Exports blocks from database back to erae format
 /// - Ensure exported files have correct structure and naming
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_roundtrip_export_after_import() {
-    // URL where the ERA1 files are hosted
+    // URL where the ERAE files are hosted
     let url = Url::from_str(ITHACA_ERA_INDEX_URL).unwrap();
     let download_folder = tempdir().unwrap();
     let download_folder = download_folder.path().to_owned().into_boxed_path();
@@ -66,7 +66,7 @@ async fn test_roundtrip_export_after_import() {
     let folder = Some(folder.path().to_owned());
     let mut hash_collector = Collector::new(4096, folder);
 
-    // Import blocks from one era1 file into database
+    // Import blocks from one erae file into database
     let last_imported_block_height = import(stream, &pf, &mut hash_collector).unwrap();
 
     assert_eq!(last_imported_block_height, 8191);
@@ -94,7 +94,7 @@ async fn test_roundtrip_export_after_import() {
         network: "mainnet".to_string(),
     };
 
-    // Export blocks from database to era1 files
+    // Export blocks from database to erae files
     let exported_files = export(&provider_ref, &export_config).expect("Export should succeed");
 
     // Calculate how many files we expect based on the configuration
@@ -130,8 +130,8 @@ async fn test_roundtrip_export_after_import() {
             blocks_numbers_per_file
         );
 
-        // Verify format: mainnet-{era_number:05}-{era_count:05}-{8hexchars}.era1
-        let era_number = file_start_block / MAX_BLOCKS_PER_ERA1 as u64;
+        // Verify format: mainnet-{era_number:05}-{era_count:05}-{8hexchars}.erae
+        let era_number = file_start_block / MAX_BLOCKS_PER_ERAE as u64;
 
         // Era count is always 1 for this test, as we are only exporting one era
         let expected_prefix = format!("mainnet-{:05}-{:05}-", era_number, 1);
@@ -145,7 +145,7 @@ async fn test_roundtrip_export_after_import() {
 
         // Verify the hash part is 8 characters
         let hash_start = expected_prefix.len();
-        let hash_end = file_name.len() - 5; // remove ".era1"
+        let hash_end = file_name.len() - 5; // remove ".erae"
         let hash_part = &file_name[hash_start..hash_end];
         assert_eq!(
             hash_part.len(),

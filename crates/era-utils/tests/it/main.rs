@@ -6,11 +6,11 @@ use reqwest::{Client, IntoUrl};
 use reth_era_downloader::HttpClient;
 use tokio_util::either::Either;
 
-// Url where the ERA1 files are hosted
-const ITHACA_ERA_INDEX_URL: &str = "https://era.ithaca.xyz/era1/index.html";
+// Url where the ERAE files are hosted
+const ITHACA_ERA_INDEX_URL: &str = "https://era.ithaca.xyz/erae/index.html";
 
 // The response containing one file that the fake client will return when the index Url is requested
-const GENESIS_ITHACA_INDEX_RESPONSE: &[u8] = b"<a href=\"https://era.ithaca.xyz/era1/mainnet-00000-5ec1ffb8.era1\">mainnet-00000-5ec1ffb8.era1</a>";
+const GENESIS_ITHACA_INDEX_RESPONSE: &[u8] = b"<a href=\"https://era.ithaca.xyz/erae/mainnet-00000-5ec1ffb8.erae\">mainnet-00000-5ec1ffb8.erae</a>";
 
 mod genesis;
 mod history;

@@ -1,7 +1,7 @@
 //! Root
 //! Includes common helpers for integration tests
 //!
-//! These tests use the `reth-era-downloader` client to download `.era1` files temporarily
+//! These tests use the `reth-era-downloader` client to download `.erae` files temporarily
 //! and verify that we can correctly read and decompress their data.
 //!
 //! Files are downloaded from [`MAINNET_URL`] and [`SEPOLIA_URL`].
@@ -11,7 +11,7 @@ use reth_era::{
     common::file_ops::{EraFileType, FileReader},
     e2s::error::E2sError,
     era::file::{EraFile, EraReader},
-    era1::file::{Era1File, Era1Reader},
+    erae::file::{EraEFile, EraEReader},
 };
 use reth_era_downloader::EraClient;
 use std::{
@@ -25,45 +25,45 @@ use eyre::{eyre, Result};
 use tempfile::TempDir;
 
 mod era;
-mod era1;
+mod erae;
 
 const fn main() {}
 
 /// Mainnet network name
 const MAINNET: &str = "mainnet";
 /// Default mainnet url
-/// for downloading mainnet `.era1` files
-const ERA1_MAINNET_URL: &str = "https://era.ithaca.xyz/era1/";
+/// for downloading mainnet `.erae` files
+const ERAE_MAINNET_URL: &str = "https://era.ithaca.xyz/erae/";
 
 /// Succinct list of mainnet files we want to download
-/// from <https://era.ithaca.xyz/era1/>
+/// from <https://era.ithaca.xyz/erae/>
 /// for testing purposes
-const ERA1_MAINNET_FILES_NAMES: [&str; 8] = [
-    "mainnet-00000-5ec1ffb8.era1",
-    "mainnet-00003-d8b8a40b.era1",
-    "mainnet-00151-e322efe1.era1",
-    "mainnet-00293-0d6c5812.era1",
-    "mainnet-00443-ea71b6f9.era1",
-    "mainnet-01367-d7efc68f.era1",
-    "mainnet-01610-99fdde4b.era1",
-    "mainnet-01895-3f81607c.era1",
+const ERAE_MAINNET_FILES_NAMES: [&str; 8] = [
+    "mainnet-00000-5ec1ffb8.erae",
+    "mainnet-00003-d8b8a40b.erae",
+    "mainnet-00151-e322efe1.erae",
+    "mainnet-00293-0d6c5812.erae",
+    "mainnet-00443-ea71b6f9.erae",
+    "mainnet-01367-d7efc68f.erae",
+    "mainnet-01610-99fdde4b.erae",
+    "mainnet-01895-3f81607c.erae",
 ];
 
 /// Sepolia network name
 const SEPOLIA: &str = "sepolia";
 
 /// Default sepolia url
-/// for downloading sepolia `.era1` files
-const ERA1_SEPOLIA_URL: &str = "https://era.ithaca.xyz/sepolia-era1/";
+/// for downloading sepolia `.erae` files
+const ERAE_SEPOLIA_URL: &str = "https://era.ithaca.xyz/sepolia-erae/";
 
 /// Succinct list of sepolia files we want to download
-/// from <https://era.ithaca.xyz/sepolia-era1/>
+/// from <https://era.ithaca.xyz/sepolia-erae/>
 /// for testing purposes
-const ERA1_SEPOLIA_FILES_NAMES: [&str; 4] = [
-    "sepolia-00000-643a00f7.era1",
-    "sepolia-00074-0e81003c.era1",
-    "sepolia-00173-b6924da5.era1",
-    "sepolia-00182-a4f0a8a1.era1",
+const ERAE_SEPOLIA_FILES_NAMES: [&str; 4] = [
+    "sepolia-00000-643a00f7.erae",
+    "sepolia-00074-0e81003c.erae",
+    "sepolia-00173-b6924da5.erae",
+    "sepolia-00182-a4f0a8a1.erae",
 ];
 
 const HOODI: &str = "hoodi";
@@ -102,7 +102,7 @@ const ERA_MAINNET_FILES_NAMES: [&str; 8] = [
     "mainnet-01592-d4dc8b98.era",
 ];
 
-/// Utility for downloading `.era` and `.era1` files for tests
+/// Utility for downloading `.era` and `.erae` files for tests
 /// in a temporary directory and caching them in memory
 #[derive(Debug)]
 struct EraTestDownloader {
@@ -121,7 +121,7 @@ impl EraTestDownloader {
         Ok(Self { temp_dir, file_cache: Arc::new(Mutex::new(HashMap::new())) })
     }
 
-    /// Download a specific .era1 file by name
+    /// Download a specific .erae file by name
     pub(crate) async fn download_file(&self, filename: &str, network: &str) -> Result<PathBuf> {
         // check cache first
         {
@@ -193,9 +193,9 @@ impl EraTestDownloader {
             .ok_or_else(|| eyre!("Unknown file extension for: {}", filename))?;
 
         match (network, file_type) {
-            (MAINNET, EraFileType::Era1) => Ok((ERA1_MAINNET_URL, &ERA1_MAINNET_FILES_NAMES[..])),
+            (MAINNET, EraFileType::EraE) => Ok((ERAE_MAINNET_URL, &ERAE_MAINNET_FILES_NAMES[..])),
             (MAINNET, EraFileType::Era) => Ok((ERA_MAINNET_URL, &ERA_MAINNET_FILES_NAMES[..])),
-            (SEPOLIA, EraFileType::Era1) => Ok((ERA1_SEPOLIA_URL, &ERA1_SEPOLIA_FILES_NAMES[..])),
+            (SEPOLIA, EraFileType::EraE) => Ok((ERAE_SEPOLIA_URL, &ERAE_SEPOLIA_FILES_NAMES[..])),
             (HOODI, EraFileType::Era) => Ok((ERA_HOODI_URL, &ERA_HOODI_FILES_NAMES[..])),
             _ => Err(eyre!(
                 "Unsupported combination: network '{}' with file type '{:?}'",
@@ -205,15 +205,15 @@ impl EraTestDownloader {
         }
     }
 
-    /// Open `.era1` file, downloading it if necessary
-    async fn open_era1_file(&self, filename: &str, network: &str) -> Result<Era1File> {
+    /// Open `.erae` file, downloading it if necessary
+    async fn open_erae_file(&self, filename: &str, network: &str) -> Result<EraEFile> {
         let path = self.download_file(filename, network).await?;
-        Era1Reader::open(&path, network).map_err(|e| eyre!("Failed to open Era1 file: {e}"))
+        EraEReader::open(&path, network).map_err(|e| eyre!("Failed to open EraE file: {e}"))
     }
 
     /// Open `.era` file, downloading it if necessary
     async fn open_era_file(&self, filename: &str, network: &str) -> Result<EraFile> {
         let path = self.download_file(filename, network).await?;
-        EraReader::open(&path, network).map_err(|e| eyre!("Failed to open Era1 file: {e}"))
+        EraReader::open(&path, network).map_err(|e| eyre!("Failed to open EraE file: {e}"))
     }
 }

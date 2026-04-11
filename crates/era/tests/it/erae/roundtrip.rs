@@ -1,4 +1,4 @@
-//! Roundtrip tests for `.era1` files.
+//! Roundtrip tests for `.erae` files.
 //!
 //! These tests verify the full lifecycle of era files by:
 //! - Reading files from their original source
@@ -7,20 +7,20 @@
 //! - Writing the data back to a new file
 //! - Confirming that all original data is preserved throughout the process
 //!
-//! Only a couple of era1 files are downloaded from <https://era.ithaca.xyz/era1/> for mainnet
-//! and <https://era.ithaca.xyz/sepolia-era1/> for sepolia to keep the tests efficient.
+//! Only a couple of erae files are downloaded from <https://era.ithaca.xyz/erae/> for mainnet
+//! and <https://era.ithaca.xyz/sepolia-erae/> for sepolia to keep the tests efficient.
 
 use alloy_consensus::{BlockBody, BlockHeader, Header, ReceiptEnvelope};
 use reth_era::{
     common::file_ops::{EraFileFormat, StreamReader, StreamWriter},
     e2s::types::IndexEntry,
-    era1::{
-        file::{Era1File, Era1Reader, Era1Writer},
+    erae::{
+        file::{EraEFile, EraEReader, EraEWriter},
         types::{
             execution::{
                 BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
             },
-            group::{Era1Group, Era1Id},
+            group::{EraEGroup, EraEId},
         },
     },
 };
@@ -30,14 +30,14 @@ use std::io::Cursor;
 use crate::{EraTestDownloader, MAINNET, SEPOLIA};
 
 // Helper function to test roundtrip compression/encoding for a specific file
-async fn test_era1_file_roundtrip(
+async fn test_erae_file_roundtrip(
     downloader: &EraTestDownloader,
     filename: &str,
     network: &str,
 ) -> eyre::Result<()> {
     println!("\nTesting roundtrip for file: {filename}");
 
-    let original_file = downloader.open_era1_file(filename, network).await?;
+    let original_file = downloader.open_erae_file(filename, network).await?;
 
     // Select a few blocks to test
     let test_block_indices = [
@@ -49,12 +49,12 @@ async fn test_era1_file_roundtrip(
     // Write the entire file to a buffer
     let mut buffer = Vec::new();
     {
-        let mut writer = Era1Writer::new(&mut buffer);
+        let mut writer = EraEWriter::new(&mut buffer);
         writer.write_file(&original_file)?;
     }
 
     // Read back from buffer
-    let reader = Era1Reader::new(Cursor::new(&buffer));
+    let reader = EraEReader::new(Cursor::new(&buffer));
     let roundtrip_file = reader.read(network.to_string())?;
 
     assert_eq!(
@@ -222,20 +222,20 @@ async fn test_era1_file_roundtrip(
         {
             let blocks = vec![recompressed_block];
 
-            let new_group = Era1Group::new(
+            let new_group = EraEGroup::new(
                 blocks,
                 original_file.group.accumulator.clone(),
                 original_file.group.block_index.clone(),
             );
 
             let new_file =
-                Era1File::new(new_group, Era1Id::new(network, original_file.id.start_block, 1));
+                EraEFile::new(new_group, EraEId::new(network, original_file.id.start_block, 1));
 
-            let mut writer = Era1Writer::new(&mut recompressed_buffer);
+            let mut writer = EraEWriter::new(&mut recompressed_buffer);
             writer.write_file(&new_file)?;
         }
 
-        let reader = Era1Reader::new(Cursor::new(&recompressed_buffer));
+        let reader = EraEReader::new(Cursor::new(&recompressed_buffer));
         let recompressed_file = reader.read(network.to_string())?;
 
         let recompressed_first_block = &recompressed_file.group.blocks[0];
@@ -255,27 +255,27 @@ async fn test_era1_file_roundtrip(
     Ok(())
 }
 
-#[test_case::test_case("mainnet-00000-5ec1ffb8.era1"; "era1_roundtrip_mainnet_0")]
-#[test_case::test_case("mainnet-00151-e322efe1.era1"; "era1_roundtrip_mainnet_151")]
-#[test_case::test_case("mainnet-01367-d7efc68f.era1"; "era1_roundtrip_mainnet_1367")]
-#[test_case::test_case("mainnet-01895-3f81607c.era1"; "era1_roundtrip_mainnet_1895")]
+#[test_case::test_case("mainnet-00000-5ec1ffb8.erae"; "erae_roundtrip_mainnet_0")]
+#[test_case::test_case("mainnet-00151-e322efe1.erae"; "erae_roundtrip_mainnet_151")]
+#[test_case::test_case("mainnet-01367-d7efc68f.erae"; "erae_roundtrip_mainnet_1367")]
+#[test_case::test_case("mainnet-01895-3f81607c.erae"; "erae_roundtrip_mainnet_1895")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "download intensive"]
 async fn test_roundtrip_compression_encoding_mainnet(filename: &str) -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
-    test_era1_file_roundtrip(&downloader, filename, MAINNET).await
+    test_erae_file_roundtrip(&downloader, filename, MAINNET).await
 }
 
-#[test_case::test_case("sepolia-00000-643a00f7.era1"; "era1_roundtrip_sepolia_0")]
-#[test_case::test_case("sepolia-00074-0e81003c.era1"; "era1_roundtrip_sepolia_74")]
-#[test_case::test_case("sepolia-00173-b6924da5.era1"; "era1_roundtrip_sepolia_173")]
-#[test_case::test_case("sepolia-00182-a4f0a8a1.era1"; "era1_roundtrip_sepolia_182")]
+#[test_case::test_case("sepolia-00000-643a00f7.erae"; "erae_roundtrip_sepolia_0")]
+#[test_case::test_case("sepolia-00074-0e81003c.erae"; "erae_roundtrip_sepolia_74")]
+#[test_case::test_case("sepolia-00173-b6924da5.erae"; "erae_roundtrip_sepolia_173")]
+#[test_case::test_case("sepolia-00182-a4f0a8a1.erae"; "erae_roundtrip_sepolia_182")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "download intensive"]
 async fn test_roundtrip_compression_encoding_sepolia(filename: &str) -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
 
-    test_era1_file_roundtrip(&downloader, filename, SEPOLIA).await?;
+    test_erae_file_roundtrip(&downloader, filename, SEPOLIA).await?;
 
     Ok(())
 }

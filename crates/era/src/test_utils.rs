@@ -2,7 +2,7 @@
 
 use crate::{
     era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock},
-    era1::types::execution::{
+    erae::types::execution::{
         BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
     },
 };

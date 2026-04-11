@@ -6,6 +6,8 @@ use reth_fs_util as fs;
 use sha2::{Digest, Sha256};
 use std::{fmt::Debug, io, io::BufRead, path::Path, str::FromStr};
 
+const ERA_FILE_EXTENSION: &str = "erae";
+
 /// Creates a new ordered asynchronous [`Stream`] of ERA1 files read from `dir`.
 pub fn read_dir(
     dir: impl AsRef<Path> + Send + Sync + 'static,
@@ -19,7 +21,7 @@ pub fn read_dir(
             (|| {
                 let path = entry?.path();
 
-                if path.extension() == Some("era1".as_ref()) &&
+                if path.extension() == Some(ERA_FILE_EXTENSION.as_ref()) &&
                     let Some(last) = path.components().next_back()
                 {
                     let str = last.as_os_str().to_string_lossy().to_string();

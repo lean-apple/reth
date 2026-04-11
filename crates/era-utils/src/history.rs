@@ -11,8 +11,8 @@ use reth_db_api::{
 use reth_era::{
     common::{decode::DecodeCompressedRlp, file_ops::StreamReader},
     e2s::error::E2sError,
-    era1::{
-        file::{BlockTupleIterator, Era1Reader},
+    erae::{
+        file::{BlockTupleIterator, EraEReader},
         types::execution::BlockTuple,
     },
 };
@@ -222,12 +222,12 @@ where
 }
 
 /// Opens the era file described by `meta`.
-pub fn open<Era>(meta: &Era) -> eyre::Result<Era1Reader<std::fs::File>>
+pub fn open<Era>(meta: &Era) -> eyre::Result<EraEReader<std::fs::File>>
 where
     Era: EraMeta + ?Sized,
 {
     let file = fs::open(meta.path())?;
-    let reader = Era1Reader::new(file);
+    let reader = EraEReader::new(file);
 
     Ok(reader)
 }

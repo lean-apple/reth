@@ -1,9 +1,9 @@
-//! Represents a complete Era1 file
+//! Represents a complete EraE file
 //!
-//! The structure of an Era1 file follows the specification:
+//! The structure of an EraE file follows the specification:
 //! `Version | block-tuple* | other-entries* | Accumulator | BlockIndex`
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md>.
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>.
 
 use crate::{
     common::file_ops::{EraFileFormat, FileReader, StreamReader, StreamWriter},
@@ -12,13 +12,13 @@ use crate::{
         file::{E2StoreReader, E2StoreWriter},
         types::{Entry, IndexEntry, Version},
     },
-    era1::types::{
+    erae::types::{
         execution::{
             Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts,
             TotalDifficulty, ACCUMULATOR, COMPRESSED_BODY, COMPRESSED_HEADER, COMPRESSED_RECEIPTS,
-            MAX_BLOCKS_PER_ERA1, TOTAL_DIFFICULTY,
+            MAX_BLOCKS_PER_ERAE, TOTAL_DIFFICULTY,
         },
-        group::{BlockIndex, Era1Group, Era1Id, BLOCK_INDEX},
+        group::{BlockIndex, EraEGroup, EraEId, BLOCK_INDEX},
     },
 };
 use alloy_primitives::BlockNumber;
@@ -28,25 +28,25 @@ use std::{
     io::{Read, Seek, Write},
 };
 
-/// Era1 file interface
+/// EraE file interface
 #[derive(Debug)]
-pub struct Era1File {
+pub struct EraEFile {
     /// Version record, must be the first record in the file
     pub version: Version,
 
-    /// Main content group of the Era1 file
-    pub group: Era1Group,
+    /// Main content group of the EraE file
+    pub group: EraEGroup,
 
     /// File identifier
-    pub id: Era1Id,
+    pub id: EraEId,
 }
 
-impl EraFileFormat for Era1File {
-    type EraGroup = Era1Group;
-    type Id = Era1Id;
+impl EraFileFormat for EraEFile {
+    type EraGroup = EraEGroup;
+    type Id = EraEId;
 
-    /// Create a new [`Era1File`]
-    fn new(group: Era1Group, id: Era1Id) -> Self {
+    /// Create a new [`EraEFile`]
+    fn new(group: EraEGroup, id: EraEId) -> Self {
         Self { version: Version, group, id }
     }
 
@@ -63,7 +63,7 @@ impl EraFileFormat for Era1File {
     }
 }
 
-impl Era1File {
+impl EraEFile {
     /// Get a block by its number, if present in this file
     pub fn get_block_by_number(&self, number: BlockNumber) -> Option<&BlockTuple> {
         let index = (number - self.group.block_index.starting_number()) as usize;
@@ -83,9 +83,9 @@ impl Era1File {
     }
 }
 
-/// Reader for Era1 files that builds on top of [`E2StoreReader`]
+/// Reader for EraE files that builds on top of [`E2StoreReader`]
 #[derive(Debug)]
-pub struct Era1Reader<R: Read> {
+pub struct EraEReader<R: Read> {
     reader: E2StoreReader<R>,
 }
 
@@ -178,11 +178,11 @@ impl<R: Read + Seek> BlockTupleIterator<R> {
     }
 }
 
-impl<R: Read + Seek> StreamReader<R> for Era1Reader<R> {
-    type File = Era1File;
+impl<R: Read + Seek> StreamReader<R> for EraEReader<R> {
+    type File = EraEFile;
     type Iterator = BlockTupleIterator<R>;
 
-    /// Create a new [`Era1Reader`]
+    /// Create a new [`EraEReader`]
     fn new(reader: R) -> Self {
         Self { reader: E2StoreReader::new(reader) }
     }
@@ -197,15 +197,15 @@ impl<R: Read + Seek> StreamReader<R> for Era1Reader<R> {
     }
 }
 
-impl<R: Read + Seek> Era1Reader<R> {
-    /// Reads and parses an Era1 file from the underlying reader, assembling all components
-    /// into a complete [`Era1File`] with an [`Era1Id`] that includes the provided network name.
-    pub fn read_and_assemble(mut self, network_name: String) -> Result<Era1File, E2sError> {
+impl<R: Read + Seek> EraEReader<R> {
+    /// Reads and parses an EraE file from the underlying reader, assembling all components
+    /// into a complete [`EraEFile`] with an [`EraEId`] that includes the provided network name.
+    pub fn read_and_assemble(mut self, network_name: String) -> Result<EraEFile, E2sError> {
         // Validate version entry
         let _version_entry = match self.reader.read_version()? {
             Some(entry) if entry.is_version() => entry,
             Some(_) => return Err(E2sError::Ssz("First entry is not a Version entry".to_string())),
-            None => return Err(E2sError::Ssz("Empty Era1 file".to_string())),
+            None => return Err(E2sError::Ssz("Empty EraE file".to_string())),
         };
 
         let mut iter = self.iter();
@@ -234,33 +234,33 @@ impl<R: Read + Seek> Era1Reader<R> {
         }
 
         let accumulator = accumulator
-            .ok_or_else(|| E2sError::Ssz("Era1 file missing accumulator entry".to_string()))?;
+            .ok_or_else(|| E2sError::Ssz("EraE file missing accumulator entry".to_string()))?;
 
         let block_index = block_index
-            .ok_or_else(|| E2sError::Ssz("Era1 file missing block index entry".to_string()))?;
+            .ok_or_else(|| E2sError::Ssz("EraE file missing block index entry".to_string()))?;
 
-        let mut group = Era1Group::new(blocks, accumulator, block_index.clone());
+        let mut group = EraEGroup::new(blocks, accumulator, block_index.clone());
 
         // Add other entries
         for entry in other_entries {
             group.add_entry(entry);
         }
 
-        let id = Era1Id::new(
+        let id = EraEId::new(
             network_name,
             block_index.starting_number(),
             block_index.offsets().len() as u32,
         );
 
-        Ok(Era1File::new(group, id))
+        Ok(EraEFile::new(group, id))
     }
 }
 
-impl FileReader for Era1Reader<File> {}
+impl FileReader for EraEReader<File> {}
 
-/// Writer for Era1 files that builds on top of [`E2StoreWriter`]
+/// Writer for EraE files that builds on top of [`E2StoreWriter`]
 #[derive(Debug)]
-pub struct Era1Writer<W: Write> {
+pub struct EraEWriter<W: Write> {
     writer: E2StoreWriter<W>,
     has_written_version: bool,
     has_written_blocks: bool,
@@ -268,10 +268,10 @@ pub struct Era1Writer<W: Write> {
     has_written_block_index: bool,
 }
 
-impl<W: Write> StreamWriter<W> for Era1Writer<W> {
-    type File = Era1File;
+impl<W: Write> StreamWriter<W> for EraEWriter<W> {
+    type File = EraEFile;
 
-    /// Create a new [`Era1Writer`]
+    /// Create a new [`EraEWriter`]
     fn new(writer: W) -> Self {
         Self {
             writer: E2StoreWriter::new(writer),
@@ -293,31 +293,31 @@ impl<W: Write> StreamWriter<W> for Era1Writer<W> {
         Ok(())
     }
 
-    /// Write a complete [`Era1File`] to the underlying writer
-    fn write_file(&mut self, era1_file: &Era1File) -> Result<(), E2sError> {
+    /// Write a complete [`EraEFile`] to the underlying writer
+    fn write_file(&mut self, erae_file: &EraEFile) -> Result<(), E2sError> {
         // Write version
         self.write_version()?;
 
         // Ensure blocks are written before other entries
-        if era1_file.group.blocks.len() > MAX_BLOCKS_PER_ERA1 {
-            return Err(E2sError::Ssz("Era1 file cannot contain more than 8192 blocks".to_string()));
+        if erae_file.group.blocks.len() > MAX_BLOCKS_PER_ERAE {
+            return Err(E2sError::Ssz("EraE file cannot contain more than 8192 blocks".to_string()));
         }
 
         // Write all blocks
-        for block in &era1_file.group.blocks {
+        for block in &erae_file.group.blocks {
             self.write_block(block)?;
         }
 
         // Write other entries
-        for entry in &era1_file.group.other_entries {
+        for entry in &erae_file.group.other_entries {
             self.writer.write_entry(entry)?;
         }
 
         // Write accumulator
-        self.write_accumulator(&era1_file.group.accumulator)?;
+        self.write_accumulator(&erae_file.group.accumulator)?;
 
         // Write block index
-        self.write_block_index(&era1_file.group.block_index)?;
+        self.write_block_index(&erae_file.group.block_index)?;
 
         // Flush the writer
         self.writer.flush()?;
@@ -331,7 +331,7 @@ impl<W: Write> StreamWriter<W> for Era1Writer<W> {
     }
 }
 
-impl<W: Write> Era1Writer<W> {
+impl<W: Write> EraEWriter<W> {
     /// Write a single block tuple
     pub fn write_block(&mut self, block_tuple: &BlockTuple) -> Result<(), E2sError> {
         if !self.has_written_version {
@@ -427,12 +427,12 @@ mod tests {
         BlockTuple::new(header, body, receipts, difficulty)
     }
 
-    // Helper to create a sample Era1File for testing
-    fn create_test_era1_file(
+    // Helper to create a sample EraEFile for testing
+    fn create_test_erae_file(
         start_block: BlockNumber,
         block_count: usize,
         network: &str,
-    ) -> Era1File {
+    ) -> EraEFile {
         // Create blocks
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
@@ -447,54 +447,54 @@ mod tests {
             offsets.push(i as i64 * 100);
         }
         let block_index = BlockIndex::new(start_block, offsets);
-        let group = Era1Group::new(blocks, accumulator, block_index);
-        let id = Era1Id::new(network, start_block, block_count as u32);
+        let group = EraEGroup::new(blocks, accumulator, block_index);
+        let id = EraEId::new(network, start_block, block_count as u32);
 
-        Era1File::new(group, id)
+        EraEFile::new(group, id)
     }
 
     #[test]
-    fn test_era1_roundtrip_memory() -> Result<(), E2sError> {
-        // Create a test Era1File
+    fn test_erae_roundtrip_memory() -> Result<(), E2sError> {
+        // Create a test EraEFile
         let start_block = 1000;
-        let era1_file = create_test_era1_file(1000, 5, "testnet");
+        let erae_file = create_test_erae_file(1000, 5, "testnet");
 
         // Write to memory buffer
         let mut buffer = Vec::new();
         {
-            let mut writer = Era1Writer::new(&mut buffer);
-            writer.write_file(&era1_file)?;
+            let mut writer = EraEWriter::new(&mut buffer);
+            writer.write_file(&erae_file)?;
         }
 
         // Read back from memory buffer
-        let reader = Era1Reader::new(Cursor::new(&buffer));
-        let read_era1 = reader.read("testnet".to_string())?;
+        let reader = EraEReader::new(Cursor::new(&buffer));
+        let read_erae = reader.read("testnet".to_string())?;
 
         // Verify core properties
-        assert_eq!(read_era1.id.network_name, "testnet");
-        assert_eq!(read_era1.id.start_block, 1000);
-        assert_eq!(read_era1.id.block_count, 5);
-        assert_eq!(read_era1.group.blocks.len(), 5);
+        assert_eq!(read_erae.id.network_name, "testnet");
+        assert_eq!(read_erae.id.start_block, 1000);
+        assert_eq!(read_erae.id.block_count, 5);
+        assert_eq!(read_erae.group.blocks.len(), 5);
 
         // Verify block properties
-        assert_eq!(read_era1.group.blocks[0].total_difficulty.value, U256::from(1000 * 1000));
-        assert_eq!(read_era1.group.blocks[1].total_difficulty.value, U256::from(1001 * 1000));
+        assert_eq!(read_erae.group.blocks[0].total_difficulty.value, U256::from(1000 * 1000));
+        assert_eq!(read_erae.group.blocks[1].total_difficulty.value, U256::from(1001 * 1000));
 
         // Verify block data
-        assert_eq!(read_era1.group.blocks[0].header.data, vec![(start_block % 256) as u8; 32]);
-        assert_eq!(read_era1.group.blocks[0].body.data, vec![((start_block + 1) % 256) as u8; 64]);
+        assert_eq!(read_erae.group.blocks[0].header.data, vec![(start_block % 256) as u8; 32]);
+        assert_eq!(read_erae.group.blocks[0].body.data, vec![((start_block + 1) % 256) as u8; 64]);
         assert_eq!(
-            read_era1.group.blocks[0].receipts.data,
+            read_erae.group.blocks[0].receipts.data,
             vec![((start_block + 2) % 256) as u8; 32]
         );
 
         // Verify block access methods
-        assert!(read_era1.contains_block(1000));
-        assert!(read_era1.contains_block(1004));
-        assert!(!read_era1.contains_block(999));
-        assert!(!read_era1.contains_block(1005));
+        assert!(read_erae.contains_block(1000));
+        assert!(read_erae.contains_block(1004));
+        assert!(!read_erae.contains_block(999));
+        assert!(!read_erae.contains_block(1005));
 
-        let block_1002 = read_era1.get_block_by_number(1002);
+        let block_1002 = read_erae.get_block_by_number(1002);
         assert!(block_1002.is_some());
         assert_eq!(block_1002.unwrap().header.data, vec![((start_block + 2) % 256) as u8; 32]);
 
@@ -502,28 +502,28 @@ mod tests {
     }
 
     #[test]
-    fn test_era1_roundtrip_file() -> Result<(), E2sError> {
+    fn test_erae_roundtrip_file() -> Result<(), E2sError> {
         // Create a temporary directory
         let temp_dir = tempdir().expect("Failed to create temp directory");
-        let file_path = temp_dir.path().join("test_roundtrip.era1");
+        let file_path = temp_dir.path().join("test_roundtrip.erae");
 
-        // Create and write `Era1File` to disk
-        let era1_file = create_test_era1_file(2000, 3, "mainnet");
-        Era1Writer::create(&file_path, &era1_file)?;
+        // Create and write `EraEFile` to disk
+        let erae_file = create_test_erae_file(2000, 3, "mainnet");
+        EraEWriter::create(&file_path, &erae_file)?;
 
         // Read it back
-        let read_era1 = Era1Reader::open(&file_path, "mainnet")?;
+        let read_erae = EraEReader::open(&file_path, "mainnet")?;
 
         // Verify core properties
-        assert_eq!(read_era1.id.network_name, "mainnet");
-        assert_eq!(read_era1.id.start_block, 2000);
-        assert_eq!(read_era1.id.block_count, 3);
-        assert_eq!(read_era1.group.blocks.len(), 3);
+        assert_eq!(read_erae.id.network_name, "mainnet");
+        assert_eq!(read_erae.id.start_block, 2000);
+        assert_eq!(read_erae.id.block_count, 3);
+        assert_eq!(read_erae.group.blocks.len(), 3);
 
         // Verify blocks
         for i in 0..3 {
             let block_num = 2000 + i as u64;
-            let block = read_era1.get_block_by_number(block_num);
+            let block = read_erae.get_block_by_number(block_num);
             assert!(block.is_some());
             assert_eq!(block.unwrap().header.data, vec![block_num as u8; 32]);
         }

@@ -1,23 +1,23 @@
-//! Era1 group for era1 file content
+//! EraE group for erae file content
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md>
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>
 
 use crate::{
     common::file_ops::{EraFileId, EraFileType},
     e2s::types::{Entry, IndexEntry},
-    era1::types::execution::{Accumulator, BlockTuple, MAX_BLOCKS_PER_ERA1},
+    erae::types::execution::{Accumulator, BlockTuple, MAX_BLOCKS_PER_ERAE},
 };
 use alloy_primitives::BlockNumber;
 
 /// `BlockIndex` record: ['f', '2']
 pub const BLOCK_INDEX: [u8; 2] = [0x66, 0x32];
 
-/// File content in an Era1 file
+/// File content in an EraE file
 ///
 /// Format: `block-tuple* | other-entries* | Accumulator | BlockIndex`
 #[derive(Debug)]
-pub struct Era1Group {
-    /// Blocks in this era1 group
+pub struct EraEGroup {
+    /// Blocks in this erae group
     pub blocks: Vec<BlockTuple>,
 
     /// Other entries that don't fit into the standard categories
@@ -30,8 +30,8 @@ pub struct Era1Group {
     pub block_index: BlockIndex,
 }
 
-impl Era1Group {
-    /// Create a new [`Era1Group`]
+impl EraEGroup {
+    /// Create a new [`EraEGroup`]
     pub const fn new(
         blocks: Vec<BlockTuple>,
         accumulator: Accumulator,
@@ -90,9 +90,9 @@ impl IndexEntry for BlockIndex {
     }
 }
 
-/// Era1 file identifier
+/// EraE file identifier
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Era1Id {
+pub struct EraEId {
     /// Network configuration name
     pub network_name: String,
 
@@ -111,8 +111,8 @@ pub struct Era1Id {
     pub include_era_count: bool,
 }
 
-impl Era1Id {
-    /// Create a new [`Era1Id`]
+impl EraEId {
+    /// Create a new [`EraEId`]
     pub fn new(
         network_name: impl Into<String>,
         start_block: BlockNumber,
@@ -127,7 +127,7 @@ impl Era1Id {
         }
     }
 
-    /// Add a hash identifier to  [`Era1Id`]
+    /// Add a hash identifier to  [`EraEId`]
     pub const fn with_hash(mut self, hash: [u8; 4]) -> Self {
         self.hash = Some(hash);
         self
@@ -140,10 +140,10 @@ impl Era1Id {
     }
 }
 
-impl EraFileId for Era1Id {
-    const FILE_TYPE: EraFileType = EraFileType::Era1;
+impl EraFileId for EraEId {
+    const FILE_TYPE: EraFileType = EraFileType::EraE;
 
-    const ITEMS_PER_ERA: u64 = MAX_BLOCKS_PER_ERA1 as u64;
+    const ITEMS_PER_ERA: u64 = MAX_BLOCKS_PER_ERAE as u64;
     fn network_name(&self) -> &str {
         &self.network_name
     }
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_era1_group_basic_construction() {
+    fn test_erae_group_basic_construction() {
         let blocks =
             vec![create_sample_block(10), create_sample_block(15), create_sample_block(20)];
 
@@ -247,18 +247,18 @@ mod tests {
         let accumulator = Accumulator::new(B256::from(root_bytes));
         let block_index = BlockIndex::new(1000, vec![100, 200, 300]);
 
-        let era1_group = Era1Group::new(blocks, accumulator.clone(), block_index);
+        let erae_group = EraEGroup::new(blocks, accumulator.clone(), block_index);
 
         // Verify initial state
-        assert_eq!(era1_group.blocks.len(), 3);
-        assert_eq!(era1_group.other_entries.len(), 0);
-        assert_eq!(era1_group.accumulator.root, accumulator.root);
-        assert_eq!(era1_group.block_index.starting_number, 1000);
-        assert_eq!(era1_group.block_index.offsets, vec![100, 200, 300]);
+        assert_eq!(erae_group.blocks.len(), 3);
+        assert_eq!(erae_group.other_entries.len(), 0);
+        assert_eq!(erae_group.accumulator.root, accumulator.root);
+        assert_eq!(erae_group.block_index.starting_number, 1000);
+        assert_eq!(erae_group.block_index.offsets, vec![100, 200, 300]);
     }
 
     #[test]
-    fn test_era1_group_add_entries() {
+    fn test_erae_group_add_entries() {
         let blocks = vec![create_sample_block(10)];
 
         let root_bytes = [0xDD; 32];
@@ -267,27 +267,27 @@ mod tests {
         let block_index = BlockIndex::new(1000, vec![100]);
 
         // Create and verify group
-        let mut era1_group = Era1Group::new(blocks, accumulator, block_index);
-        assert_eq!(era1_group.other_entries.len(), 0);
+        let mut erae_group = EraEGroup::new(blocks, accumulator, block_index);
+        assert_eq!(erae_group.other_entries.len(), 0);
 
         // Create custom entries with different types
         let entry1 = Entry::new([0x01, 0x01], vec![1, 2, 3, 4]);
         let entry2 = Entry::new([0x02, 0x02], vec![5, 6, 7, 8]);
 
         // Add those entries
-        era1_group.add_entry(entry1);
-        era1_group.add_entry(entry2);
+        erae_group.add_entry(entry1);
+        erae_group.add_entry(entry2);
 
         // Verify entries were added correctly
-        assert_eq!(era1_group.other_entries.len(), 2);
-        assert_eq!(era1_group.other_entries[0].entry_type, [0x01, 0x01]);
-        assert_eq!(era1_group.other_entries[0].data, vec![1, 2, 3, 4]);
-        assert_eq!(era1_group.other_entries[1].entry_type, [0x02, 0x02]);
-        assert_eq!(era1_group.other_entries[1].data, vec![5, 6, 7, 8]);
+        assert_eq!(erae_group.other_entries.len(), 2);
+        assert_eq!(erae_group.other_entries[0].entry_type, [0x01, 0x01]);
+        assert_eq!(erae_group.other_entries[0].data, vec![1, 2, 3, 4]);
+        assert_eq!(erae_group.other_entries[1].entry_type, [0x02, 0x02]);
+        assert_eq!(erae_group.other_entries[1].data, vec![5, 6, 7, 8]);
     }
 
     #[test]
-    fn test_era1_group_with_mismatched_index() {
+    fn test_erae_group_with_mismatched_index() {
         let blocks =
             vec![create_sample_block(10), create_sample_block(15), create_sample_block(20)];
 
@@ -297,63 +297,63 @@ mod tests {
         // Create block index with different starting number
         let block_index = BlockIndex::new(2000, vec![100, 200, 300]);
 
-        // This should create a valid Era1Group
+        // This should create a valid EraEGroup
         // even though the block numbers don't match the block index
-        // validation not at the era1 group level
-        let era1_group = Era1Group::new(blocks, accumulator, block_index);
+        // validation not at the erae group level
+        let erae_group = EraEGroup::new(blocks, accumulator, block_index);
 
         // Verify the mismatch exists but the group was created
-        assert_eq!(era1_group.blocks.len(), 3);
-        assert_eq!(era1_group.block_index.starting_number, 2000);
+        assert_eq!(erae_group.blocks.len(), 3);
+        assert_eq!(erae_group.block_index.starting_number, 2000);
     }
 
     #[test_case::test_case(
-        Era1Id::new("mainnet", 0, 8192).with_hash([0x5e, 0xc1, 0xff, 0xb8]),
-        "mainnet-00000-5ec1ffb8.era1";
+        EraEId::new("mainnet", 0, 8192).with_hash([0x5e, 0xc1, 0xff, 0xb8]),
+        "mainnet-00000-5ec1ffb8.erae";
         "Mainnet era 0"
     )]
     #[test_case::test_case(
-        Era1Id::new("mainnet", 8192, 8192).with_hash([0x5e, 0xcb, 0x9b, 0xf9]),
-        "mainnet-00001-5ecb9bf9.era1";
+        EraEId::new("mainnet", 8192, 8192).with_hash([0x5e, 0xcb, 0x9b, 0xf9]),
+        "mainnet-00001-5ecb9bf9.erae";
         "Mainnet era 1"
     )]
     #[test_case::test_case(
-        Era1Id::new("sepolia", 0, 8192).with_hash([0x90, 0x91, 0x84, 0x72]),
-        "sepolia-00000-90918472.era1";
+        EraEId::new("sepolia", 0, 8192).with_hash([0x90, 0x91, 0x84, 0x72]),
+        "sepolia-00000-90918472.erae";
         "Sepolia era 0"
     )]
     #[test_case::test_case(
-        Era1Id::new("sepolia", 155648, 8192).with_hash([0xfa, 0x77, 0x00, 0x19]),
-        "sepolia-00019-fa770019.era1";
+        EraEId::new("sepolia", 155648, 8192).with_hash([0xfa, 0x77, 0x00, 0x19]),
+        "sepolia-00019-fa770019.erae";
         "Sepolia era 19"
     )]
     #[test_case::test_case(
-        Era1Id::new("mainnet", 1000, 100),
-        "mainnet-00000-00000000.era1";
+        EraEId::new("mainnet", 1000, 100),
+        "mainnet-00000-00000000.erae";
         "ID without hash"
     )]
     #[test_case::test_case(
-        Era1Id::new("sepolia", 101130240, 8192).with_hash([0xab, 0xcd, 0xef, 0x12]),
-        "sepolia-12345-abcdef12.era1";
+        EraEId::new("sepolia", 101130240, 8192).with_hash([0xab, 0xcd, 0xef, 0x12]),
+        "sepolia-12345-abcdef12.erae";
         "Large block number era 12345"
     )]
-    fn test_era1_id_file_naming(id: Era1Id, expected_file_name: &str) {
+    fn test_erae_id_file_naming(id: EraEId, expected_file_name: &str) {
         let actual_file_name = id.to_file_name();
         assert_eq!(actual_file_name, expected_file_name);
     }
 
     // File naming with era-count, for custom exports
     #[test_case::test_case(
-        Era1Id::new("mainnet", 0, 8192).with_hash([0x5e, 0xc1, 0xff, 0xb8]).with_era_count(),
-        "mainnet-00000-00001-5ec1ffb8.era1";
+        EraEId::new("mainnet", 0, 8192).with_hash([0x5e, 0xc1, 0xff, 0xb8]).with_era_count(),
+        "mainnet-00000-00001-5ec1ffb8.erae";
         "Mainnet era 0 with count"
     )]
     #[test_case::test_case(
-        Era1Id::new("mainnet", 8000, 500).with_hash([0xab, 0xcd, 0xef, 0x12]).with_era_count(),
-        "mainnet-00000-00002-abcdef12.era1";
+        EraEId::new("mainnet", 8000, 500).with_hash([0xab, 0xcd, 0xef, 0x12]).with_era_count(),
+        "mainnet-00000-00002-abcdef12.erae";
         "Spanning two eras with count"
     )]
-    fn test_era1_id_file_naming_with_era_count(id: Era1Id, expected_file_name: &str) {
+    fn test_erae_id_file_naming_with_era_count(id: EraEId, expected_file_name: &str) {
         let actual_file_name = id.to_file_name();
         assert_eq!(actual_file_name, expected_file_name);
     }

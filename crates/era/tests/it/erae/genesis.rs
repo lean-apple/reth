@@ -1,13 +1,13 @@
-//! Genesis block tests for `.era1` files.
+//! Genesis block tests for `.erae` files.
 //!
 //! These tests verify proper decompression and decoding of genesis blocks
 //! from different networks.
 
 use crate::{
-    EraTestDownloader, ERA1_MAINNET_FILES_NAMES, ERA1_SEPOLIA_FILES_NAMES, MAINNET, SEPOLIA,
+    EraTestDownloader, ERAE_MAINNET_FILES_NAMES, ERAE_SEPOLIA_FILES_NAMES, MAINNET, SEPOLIA,
 };
 use alloy_consensus::{BlockBody, Header};
-use reth_era::{e2s::types::IndexEntry, era1::types::execution::CompressedBody};
+use reth_era::{e2s::types::IndexEntry, erae::types::execution::CompressedBody};
 use reth_ethereum_primitives::TransactionSigned;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -15,7 +15,7 @@ use reth_ethereum_primitives::TransactionSigned;
 async fn test_mainnet_genesis_block_decompression() -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
 
-    let file = downloader.open_era1_file(ERA1_MAINNET_FILES_NAMES[0], MAINNET).await?;
+    let file = downloader.open_erae_file(ERAE_MAINNET_FILES_NAMES[0], MAINNET).await?;
 
     // Genesis and a few early blocks
     let test_blocks = [0, 1, 10, 100];
@@ -67,7 +67,7 @@ async fn test_mainnet_genesis_block_decompression() -> eyre::Result<()> {
 async fn test_sepolia_genesis_block_decompression() -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
 
-    let file = downloader.open_era1_file(ERA1_SEPOLIA_FILES_NAMES[0], SEPOLIA).await?;
+    let file = downloader.open_erae_file(ERAE_SEPOLIA_FILES_NAMES[0], SEPOLIA).await?;
 
     // Genesis and a few early blocks
     let test_blocks = [0, 1, 10, 100];

@@ -33,7 +33,7 @@ pub trait EraFileId: Clone {
     /// File type for this identifier
     const FILE_TYPE: EraFileType;
 
-    /// Number of items, slots for `era`, blocks for `era1`, per era
+    /// Number of items, slots for `era`, blocks for `erae`, per era
     const ITEMS_PER_ERA: u64;
 
     /// Get the network name
@@ -169,9 +169,9 @@ pub enum EraFileType {
     /// Consensus layer ERA file, `.era`
     /// Contains beacon blocks and states
     Era,
-    /// Execution layer ERA1 file, `.era1`
-    /// Contains execution blocks pre-merge
-    Era1,
+    /// Execution layer EraE file, `.erae`
+    /// Contains execution blocks for both pre-merge and post-merge
+    EraE,
 }
 
 impl EraFileType {
@@ -179,7 +179,7 @@ impl EraFileType {
     pub const fn extension(&self) -> &'static str {
         match self {
             Self::Era => ".era",
-            Self::Era1 => ".era1",
+            Self::EraE => ".erae",
         }
     }
 
@@ -187,8 +187,8 @@ impl EraFileType {
     pub fn from_filename(filename: &str) -> Option<Self> {
         if filename.ends_with(".era") {
             Some(Self::Era)
-        } else if filename.ends_with(".era1") {
-            Some(Self::Era1)
+        } else if filename.ends_with(".erae") {
+            Some(Self::EraE)
         } else {
             None
         }
@@ -228,8 +228,8 @@ impl EraFileType {
     /// Detect file type from URL
     /// By default, it assumes `Era` type
     pub fn from_url(url: &str) -> Self {
-        if url.contains("era1") {
-            Self::Era1
+        if url.contains("erae") {
+            Self::EraE
         } else {
             Self::Era
         }

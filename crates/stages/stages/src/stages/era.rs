@@ -4,7 +4,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Url};
 use reth_config::config::EtlConfig;
 use reth_db_api::{table::Value, transaction::DbTxMut};
-use reth_era::{common::file_ops::StreamReader, era1::file::Era1Reader};
+use reth_era::{common::file_ops::StreamReader, erae::file::EraEReader};
 use reth_era_downloader::{read_dir, EraClient, EraMeta, EraStream, EraStreamConfig};
 use reth_era_utils as era;
 use reth_etl::Collector;
@@ -27,7 +27,7 @@ type Item<Header, Body> =
 type ThreadSafeEraStream<Header, Body> =
     Box<dyn Stream<Item = eyre::Result<Item<Header, Body>>> + Send + Sync + Unpin>;
 
-/// The [ERA1](https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md)
+/// The [ERAE](https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md)
 /// pre-merge history stage.
 ///
 /// Imports block headers and bodies from genesis up to the last pre-merge block. Receipts are
@@ -86,7 +86,7 @@ impl EraImportSource {
         Ok(Box::new(Box::pin(stream.map(|meta| {
             meta.and_then(|meta| {
                 let file = reth_fs_util::open(meta.path())?;
-                let reader = Era1Reader::new(file);
+                let reader = EraEReader::new(file);
                 let iter = reader.iter();
                 let iter = iter.map(era::decode);
                 let iter = iter.chain(

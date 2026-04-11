@@ -1,4 +1,4 @@
-//! Execution layer specific types for `.era1` files
+//! Execution layer specific types for `.erae` files
 //!
 //! Contains implementations for compressed execution layer data structures:
 //! - [`CompressedHeader`] - Block header
@@ -8,7 +8,7 @@
 //!
 //! These types use Snappy compression to match the specification.
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md>
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>
 //!
 //! # Examples
 //!
@@ -16,7 +16,7 @@
 //!
 //! ```rust
 //! use alloy_consensus::Header;
-//! use reth_era::{common::decode::DecodeCompressedRlp, era1::types::execution::CompressedHeader};
+//! use reth_era::{common::decode::DecodeCompressedRlp, erae::types::execution::CompressedHeader};
 //!
 //! let header = Header { number: 100, ..Default::default() };
 //! // Compress the header: rlp encoding and Snappy compression
@@ -32,7 +32,7 @@
 //! ```rust
 //! use alloy_consensus::{BlockBody, Header};
 //! use alloy_primitives::Bytes;
-//! use reth_era::{common::decode::DecodeCompressedRlp, era1::types::execution::CompressedBody};
+//! use reth_era::{common::decode::DecodeCompressedRlp, erae::types::execution::CompressedBody};
 //! use reth_ethereum_primitives::TransactionSigned;
 //!
 //! let body: BlockBody<Bytes> = BlockBody {
@@ -54,7 +54,7 @@
 //! ```rust
 //! use alloy_consensus::{Eip658Value, Receipt, ReceiptEnvelope, ReceiptWithBloom};
 //! use reth_era::{
-//!     common::decode::DecodeCompressedRlp, era1::types::execution::CompressedReceipts,
+//!     common::decode::DecodeCompressedRlp, erae::types::execution::CompressedReceipts,
 //! };
 //!
 //! let receipt =
@@ -82,7 +82,7 @@ use std::{
     marker::PhantomData,
 };
 
-// Era1-specific constants
+// EraE-specific constants
 /// `CompressedHeader` record type
 pub const COMPRESSED_HEADER: [u8; 2] = [0x03, 0x00];
 
@@ -98,8 +98,8 @@ pub const TOTAL_DIFFICULTY: [u8; 2] = [0x06, 0x00];
 /// `Accumulator` record type
 pub const ACCUMULATOR: [u8; 2] = [0x07, 0x00];
 
-/// Maximum number of blocks in an Era1 file, limited by accumulator size
-pub const MAX_BLOCKS_PER_ERA1: usize = 8192;
+/// Maximum number of blocks in an EraE file, limited by accumulator size
+pub const MAX_BLOCKS_PER_ERAE: usize = 8192;
 
 /// Generic codec for Snappy-compressed RLP data
 #[derive(Debug, Clone, Default)]
@@ -425,7 +425,7 @@ impl TotalDifficulty {
 
     /// Convert to an [`Entry`]
     pub fn to_entry(&self) -> Entry {
-        // era1 spec: `total-difficulty = { type: 0x0600, data: SSZ uint256 }` (little-endian)
+        // erae spec: `total-difficulty = { type: 0x0600, data: SSZ uint256 }` (little-endian)
         let data = self.value.to_le_bytes::<32>().to_vec();
         Entry::new(TOTAL_DIFFICULTY, data)
     }
@@ -446,7 +446,7 @@ impl TotalDifficulty {
             )));
         }
 
-        // era1 spec: `total-difficulty = { type: 0x0600, data: SSZ uint256 }` (little-endian)
+        // erae spec: `total-difficulty = { type: 0x0600, data: SSZ uint256 }` (little-endian)
         let value = U256::from_le_slice(&entry.data);
 
         Ok(Self { value })
@@ -495,7 +495,7 @@ impl Accumulator {
     }
 }
 
-/// A block tuple in an Era1 file, containing all components for a single block
+/// A block tuple in an EraE file, containing all components for a single block
 #[derive(Debug, Clone)]
 pub struct BlockTuple {
     /// Compressed block header
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn test_total_difficulty_ssz_le_encoding() {
         // Verify that total-difficulty is encoded as SSZ uint256 (little-endian).
-        // See https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md
+        // See https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md
         let value = U256::from(1u64);
         let td = TotalDifficulty::new(value);
         let entry = td.to_entry();
@@ -700,7 +700,7 @@ mod tests {
             .expect("Failed to compress receipt list");
 
         // Decode the compressed receipts back
-        // Note: For real ERA1 files, use `Vec<ReceiptWithBloom>` before Era ~1520 or use
+        // Note: For real ERAE files, use `Vec<ReceiptWithBloom>` before Era ~1520 or use
         // `Vec<ReceiptEnvelope>` after this era
         let decoded_receipts: Vec<Receipt> =
             compressed_receipts.decode().expect("Failed to decode compressed receipt list");

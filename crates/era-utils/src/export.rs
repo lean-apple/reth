@@ -1,5 +1,5 @@
-//! Logic to export from database era1 block history
-//! and injecting them into era1 files with `Era1Writer`.
+//! Logic to export from database erae block history
+//! and injecting them into erae files with `EraEWriter`.
 
 use crate::calculate_td_by_number;
 use alloy_consensus::BlockHeader;
@@ -8,14 +8,14 @@ use eyre::{eyre, Result};
 use reth_era::{
     common::file_ops::{EraFileId, StreamWriter},
     e2s::types::IndexEntry,
-    era1::{
-        file::Era1Writer,
+    erae::{
+        file::EraEWriter,
         types::{
             execution::{
                 Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts,
-                TotalDifficulty, MAX_BLOCKS_PER_ERA1,
+                TotalDifficulty, MAX_BLOCKS_PER_ERAE,
             },
-            group::{BlockIndex, Era1Id},
+            group::{BlockIndex, EraEId},
         },
     },
 };
@@ -33,18 +33,18 @@ const ENTRY_HEADER_SIZE: usize = 8;
 const VERSION_ENTRY_SIZE: usize = ENTRY_HEADER_SIZE;
 
 /// Configuration to export block history
-/// to era1 files
+/// to erae files
 #[derive(Clone, Debug)]
 pub struct ExportConfig {
-    /// Directory to export era1 files to
+    /// Directory to export erae files to
     pub dir: PathBuf,
     /// First block to export
     pub first_block_number: BlockNumber,
     /// Last block to export
     pub last_block_number: BlockNumber,
-    /// Number of blocks per era1 file
-    /// It can never be larger than `MAX_BLOCKS_PER_ERA1 = 8192`
-    /// See also <`https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md`>
+    /// Number of blocks per erae file
+    /// It can never be larger than `MAX_BLOCKS_PER_ERAE = 8192`
+    /// See also <`https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md`>
     pub max_blocks_per_file: u64,
     /// Network name.
     pub network: String,
@@ -55,8 +55,8 @@ impl Default for ExportConfig {
         Self {
             dir: PathBuf::new(),
             first_block_number: 0,
-            last_block_number: (MAX_BLOCKS_PER_ERA1 - 1) as u64,
-            max_blocks_per_file: MAX_BLOCKS_PER_ERA1 as u64,
+            last_block_number: (MAX_BLOCKS_PER_ERAE - 1) as u64,
+            max_blocks_per_file: MAX_BLOCKS_PER_ERAE as u64,
             network: "mainnet".to_string(),
         }
     }
@@ -65,11 +65,11 @@ impl Default for ExportConfig {
 impl ExportConfig {
     /// Validates the export configuration parameters
     pub fn validate(&self) -> Result<()> {
-        if self.max_blocks_per_file > MAX_BLOCKS_PER_ERA1 as u64 {
+        if self.max_blocks_per_file > MAX_BLOCKS_PER_ERAE as u64 {
             return Err(eyre!(
-                "Max blocks per file ({}) exceeds ERA1 limit ({})",
+                "Max blocks per file ({}) exceeds ERAE limit ({})",
                 self.max_blocks_per_file,
-                MAX_BLOCKS_PER_ERA1
+                MAX_BLOCKS_PER_ERAE
             ));
         }
 
@@ -82,7 +82,7 @@ impl ExportConfig {
 }
 
 /// Fetches block history data from the provider
-/// and prepares it for export to era1 files
+/// and prepares it for export to erae files
 /// for a given number of blocks then writes them to disk.
 pub fn export<P>(provider: &P, config: &ExportConfig) -> Result<Vec<PathBuf>>
 where
@@ -103,7 +103,7 @@ where
         first = config.first_block_number,
         last = last_block_number,
         max_blocks_per_file = config.max_blocks_per_file,
-        "Preparing era1 export data"
+        "Preparing erae export data"
     );
 
     if !config.dir.exists() {
@@ -148,19 +148,19 @@ where
             })
             .unwrap_or([0u8; 4]);
 
-        let era1_id = Era1Id::new(&config.network, start_block, block_count as u32)
+        let erae_id = EraEId::new(&config.network, start_block, block_count as u32)
             .with_hash(historical_root);
 
-        let era1_id = if config.max_blocks_per_file == MAX_BLOCKS_PER_ERA1 as u64 {
-            era1_id
+        let erae_id = if config.max_blocks_per_file == MAX_BLOCKS_PER_ERAE as u64 {
+            erae_id
         } else {
-            era1_id.with_era_count()
+            erae_id.with_era_count()
         };
 
-        debug!("Final file name {}", era1_id.to_file_name());
-        let file_path = config.dir.join(era1_id.to_file_name());
+        debug!("Final file name {}", erae_id.to_file_name());
+        let file_path = config.dir.join(erae_id.to_file_name());
         let file = std::fs::File::create(&file_path)?;
-        let mut writer = Era1Writer::new(file);
+        let mut writer = EraEWriter::new(file);
         writer.write_version()?;
 
         let mut offsets = Vec::<i64>::with_capacity(block_count);
@@ -229,7 +229,7 @@ where
 
             info!(
                 target: "era::history::export",
-                "Wrote ERA1 file: {file_path:?} with {blocks_written} blocks"
+                "Wrote ERAE file: {file_path:?} with {blocks_written} blocks"
             );
             created_files.push(file_path);
         }
@@ -237,7 +237,7 @@ where
 
     info!(
         target: "era::history::export",
-        "Successfully wrote {} ERA1 files in {:?}",
+        "Successfully wrote {} ERAE files in {:?}",
         created_files.len(),
         start_time.elapsed()
     );
@@ -319,7 +319,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::ExportConfig;
-    use reth_era::era1::types::execution::MAX_BLOCKS_PER_ERA1;
+    use reth_era::erae::types::execution::MAX_BLOCKS_PER_ERAE;
     use tempfile::tempdir;
 
     #[test]
@@ -332,8 +332,8 @@ mod tests {
 
         // Exactly at the limit should pass
         let limit_config =
-            ExportConfig { max_blocks_per_file: MAX_BLOCKS_PER_ERA1 as u64, ..Default::default() };
-        assert!(limit_config.validate().is_ok(), "Config at ERA1 limit should pass validation");
+            ExportConfig { max_blocks_per_file: MAX_BLOCKS_PER_ERAE as u64, ..Default::default() };
+        assert!(limit_config.validate().is_ok(), "Config at ERAE limit should pass validation");
 
         // Valid config should pass
         let valid_config = ExportConfig {
@@ -352,13 +352,13 @@ mod tests {
         assert!(result.is_err(), "Zero blocks per file should fail validation");
         assert!(result.unwrap_err().to_string().contains("cannot be zero"));
 
-        // Exceeding era1 limit should fail
+        // Exceeding erae limit should fail
         let oversized_config = ExportConfig {
-            max_blocks_per_file: MAX_BLOCKS_PER_ERA1 as u64 + 1, // Invalid
+            max_blocks_per_file: MAX_BLOCKS_PER_ERAE as u64 + 1, // Invalid
             ..Default::default()
         };
         let result = oversized_config.validate();
         assert!(result.is_err(), "Oversized blocks per file should fail validation");
-        assert!(result.unwrap_err().to_string().contains("exceeds ERA1 limit"));
+        assert!(result.unwrap_err().to_string().contains("exceeds ERAE limit"));
     }
 }

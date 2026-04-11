@@ -107,7 +107,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
                 }
             }
 
-            if self.era_type == EraFileType::Era1 {
+            if self.era_type == EraFileType::EraE {
                 self.assert_checksum(number, actual_checksum?)
                     .await
                     .map_err(|e| eyre!("{e} for {file_name} at {}", path.display()))?;
@@ -183,8 +183,8 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         let index_path = self.folder.to_path_buf().join(INDEX_HTML_FILE);
         let checksums_path = self.folder.to_path_buf().join(Self::CHECKSUMS);
 
-        // Only for era1, we download also checksums file
-        if self.era_type == EraFileType::Era1 {
+        // Only for erae, we download also checksums file
+        if self.era_type == EraFileType::EraE {
             let checksums_url = self.url.join(Self::CHECKSUMS)?;
             try_join!(
                 self.download_file_to_path(self.url.clone(), &index_path),
@@ -258,7 +258,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
 
         match File::open(path).await {
             Ok(file) => {
-                if self.era_type == EraFileType::Era1 {
+                if self.era_type == EraFileType::EraE {
                     let number = self
                         .file_name_to_number(name)
                         .ok_or_else(|| eyre!("Cannot parse ERA number from {name}"))?;
@@ -365,9 +365,9 @@ mod tests {
         }
     }
 
-    #[test_case("mainnet-00600-a81ae85f.era1", Some(600))]
-    #[test_case("mainnet-00000-a81ae85f.era1", Some(0))]
-    #[test_case("00000-a81ae85f.era1", None)]
+    #[test_case("mainnet-00600-a81ae85f.erae", Some(600))]
+    #[test_case("mainnet-00000-a81ae85f.erae", Some(0))]
+    #[test_case("00000-a81ae85f.erae", None)]
     #[test_case("", None)]
     fn test_file_name_to_number(file_name: &str, expected_number: Option<usize>) {
         let client = EraClient::empty();
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_with_era_type_overrides_auto_detection() {
-        // URL without "era1" auto-detects as Era
+        // URL without "erae" auto-detects as Era
         let client = EraClient::new(
             Client::new(),
             Url::from_str("https://example.com/").unwrap(),
@@ -387,8 +387,8 @@ mod tests {
         );
         assert_eq!(client.era_type, EraFileType::Era);
 
-        // with_era_type overrides to Era1
-        let client = client.with_era_type(EraFileType::Era1);
-        assert_eq!(client.era_type, EraFileType::Era1);
+        // with_era_type overrides to EraE
+        let client = client.with_era_type(EraFileType::EraE);
+        assert_eq!(client.era_type, EraFileType::EraE);
     }
 }

@@ -27,7 +27,7 @@ fn test_export_with_genesis_only() {
         file_name.starts_with("mainnet-00000-"),
         "File should have correct prefix with era format"
     );
-    assert!(file_name.ends_with(".era1"), "File should have correct extension");
+    assert!(file_name.ends_with(".erae"), "File should have correct extension");
     let metadata = fs::metadata(file_path).unwrap();
     assert!(metadata.len() > 0, "Exported file should not be empty");
 }
