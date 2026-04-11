@@ -1,16 +1,17 @@
 //! Represents a complete EraE file
 //!
 //! The structure of an EraE file follows the specification:
-//! `Version | block-tuple* | other-entries* | Accumulator | BlockIndex`
+//! `Version | CompressedHeader+ | CompressedBody+ | CompressedSlimReceipts+ | Proofs+ |
+//! TotalDifficulty* | other-entries* | Accumulator? | BlockIndex`
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>.
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md>.
 
 use crate::{
     common::file_ops::{EraFileFormat, FileReader, StreamReader, StreamWriter},
     e2s::{
         error::E2sError,
         file::{E2StoreReader, E2StoreWriter},
-        types::{Entry, IndexEntry, Version},
+        types::{Entry, Version},
     },
     erae::types::{
         execution::{
@@ -249,7 +250,7 @@ impl<R: Read + Seek> EraEReader<R> {
         let id = EraEId::new(
             network_name,
             block_index.starting_number(),
-            block_index.offsets().len() as u32,
+            block_index.block_count() as u32,
         );
 
         Ok(EraEFile::new(group, id))
@@ -442,11 +443,14 @@ mod tests {
 
         let accumulator = Accumulator::new(B256::from([0xAA; 32]));
 
-        let mut offsets = Vec::with_capacity(block_count);
+        let component_count = 4u64; // header + body + receipts + td
+        let mut offsets = Vec::with_capacity(block_count * component_count as usize);
         for i in 0..block_count {
-            offsets.push(i as i64 * 100);
+            for c in 0..component_count as usize {
+                offsets.push((i * component_count as usize + c) as i64 * 100);
+            }
         }
-        let block_index = BlockIndex::new(start_block, offsets);
+        let block_index = BlockIndex::new(start_block, component_count, offsets);
         let group = EraEGroup::new(blocks, accumulator, block_index);
         let id = EraEId::new(network, start_block, block_count as u32);
 

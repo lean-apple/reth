@@ -8,7 +8,7 @@
 //!
 //! These types use Snappy compression to match the specification.
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md>
 //!
 //! # Examples
 //!
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn test_total_difficulty_ssz_le_encoding() {
         // Verify that total-difficulty is encoded as SSZ uint256 (little-endian).
-        // See https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md
+        // See https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md
         let value = U256::from(1u64);
         let td = TotalDifficulty::new(value);
         let entry = td.to_entry();

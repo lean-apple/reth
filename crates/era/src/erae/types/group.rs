@@ -1,10 +1,10 @@
 //! EraE group for erae file content
 //!
-//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/erae.md>
+//! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md>
 
 use crate::{
     common::file_ops::{EraFileId, EraFileType},
-    e2s::types::{Entry, IndexEntry},
+    e2s::{error::E2sError, types::Entry},
     erae::types::execution::{Accumulator, BlockTuple, MAX_BLOCKS_PER_ERAE},
 };
 use alloy_primitives::BlockNumber;
@@ -46,47 +46,170 @@ impl EraEGroup {
     }
 }
 
-/// [`BlockIndex`] records store offsets to data at specific block numbers
-/// from the beginning of the index record to the beginning of the corresponding data.
+/// EraE block index with dynamic component count.
 ///
 /// Format:
-/// `starting-(block)-number | index | index | index ... | count`
+/// `starting-number | indexes | indexes | ... | component-count | count`
+///
+/// Where each `indexes` group contains offsets for one block:
+/// `header-index | body-index | receipts-index? | difficulty-index? | proof-index?`
+///
+/// `component-count` is 2-5 depending on which optional components are present.
 #[derive(Debug, Clone)]
 pub struct BlockIndex {
     /// Starting block number
     starting_number: BlockNumber,
 
-    /// Offsets to data at each block number
+    /// Number of index components per block (2-5)
+    component_count: u64,
+
+    /// Flat array of offsets: `[h0, b0, (r0)?, (d0)?, (p0)?, h1, b1, ...]`
+    /// Length = block_count * component_count
     offsets: Vec<i64>,
 }
 
 impl BlockIndex {
-    /// Get the offset for a specific block number
-    pub fn offset_for_block(&self, block_number: BlockNumber) -> Option<i64> {
-        if block_number < self.starting_number {
-            return None;
-        }
-
-        let index = (block_number - self.starting_number) as usize;
-        self.offsets.get(index).copied()
-    }
-}
-
-impl IndexEntry for BlockIndex {
-    fn new(starting_number: u64, offsets: Vec<i64>) -> Self {
-        Self { starting_number, offsets }
+    /// Create a new [`BlockIndex`] with the given component count
+    pub fn new(starting_number: u64, component_count: u64, offsets: Vec<i64>) -> Self {
+        Self { starting_number, component_count, offsets }
     }
 
-    fn entry_type() -> [u8; 2] {
-        BLOCK_INDEX
-    }
-
-    fn starting_number(&self) -> u64 {
+    /// Get the starting block number
+    pub const fn starting_number(&self) -> u64 {
         self.starting_number
     }
 
-    fn offsets(&self) -> &[i64] {
+    /// Get the component count per block
+    pub const fn component_count(&self) -> u64 {
+        self.component_count
+    }
+
+    /// Get the number of blocks in this index
+    pub fn block_count(&self) -> usize {
+        if self.component_count == 0 {
+            return 0;
+        }
+        self.offsets.len() / self.component_count as usize
+    }
+
+    /// Get all offsets
+    pub fn offsets(&self) -> &[i64] {
         &self.offsets
+    }
+
+    /// Get the offsets for a specific block number.
+    ///
+    /// Returns a slice of `component_count` offsets:
+    /// `[header_offset, body_offset, (receipts_offset)?, (difficulty_offset)?, (proof_offset)?]`
+    pub fn offsets_for_block(&self, block_number: BlockNumber) -> Option<&[i64]> {
+        if block_number < self.starting_number {
+            return None;
+        }
+        let index = (block_number - self.starting_number) as usize;
+        let cc = self.component_count as usize;
+        let start = index * cc;
+        let end = start + cc;
+        if end > self.offsets.len() {
+            return None;
+        }
+        Some(&self.offsets[start..end])
+    }
+
+    /// Get the header offset for a specific block number
+    pub fn header_offset(&self, block_number: BlockNumber) -> Option<i64> {
+        self.offsets_for_block(block_number).map(|o| o[0])
+    }
+
+    /// Get the body offset for a specific block number
+    pub fn body_offset(&self, block_number: BlockNumber) -> Option<i64> {
+        self.offsets_for_block(block_number).map(|o| o[1])
+    }
+
+    /// Convert to an [`Entry`] for storage in an e2store file.
+    ///
+    /// Format: `starting-number | offsets... | component-count | count`
+    pub fn to_entry(&self) -> Entry {
+        let block_count = self.block_count();
+        let mut data = Vec::with_capacity(8 + self.offsets.len() * 8 + 8 + 8);
+
+        data.extend_from_slice(&self.starting_number.to_le_bytes());
+        data.extend(self.offsets.iter().flat_map(|o| o.to_le_bytes()));
+        data.extend_from_slice(&self.component_count.to_le_bytes());
+        data.extend_from_slice(&(block_count as i64).to_le_bytes());
+
+        Entry::new(BLOCK_INDEX, data)
+    }
+
+    /// Create from an [`Entry`]
+    pub fn from_entry(entry: &Entry) -> Result<Self, E2sError> {
+        if entry.entry_type != BLOCK_INDEX {
+            return Err(E2sError::Ssz(format!(
+                "Invalid entry type for BlockIndex: expected {:02x}{:02x}, got {:02x}{:02x}",
+                BLOCK_INDEX[0], BLOCK_INDEX[1], entry.entry_type[0], entry.entry_type[1]
+            )));
+        }
+
+        // Need at least: starting-number(8) + component-count(8) + count(8) = 24 bytes
+        if entry.data.len() < 24 {
+            return Err(E2sError::Ssz(
+                "Block index too short: need at least 24 bytes".to_string(),
+            ));
+        }
+
+        let data = &entry.data;
+        let len = data.len();
+
+        // Extract count from last 8 bytes
+        let count = i64::from_le_bytes(
+            data[len - 8..]
+                .try_into()
+                .map_err(|_| E2sError::Ssz("Failed to read count bytes".to_string()))?,
+        ) as usize;
+
+        // Extract component-count from second-to-last 8 bytes
+        let component_count = u64::from_le_bytes(
+            data[len - 16..len - 8]
+                .try_into()
+                .map_err(|_| E2sError::Ssz("Failed to read component-count bytes".to_string()))?,
+        );
+
+        if !(2..=5).contains(&component_count) {
+            return Err(E2sError::Ssz(format!(
+                "Invalid component-count: {component_count}, expected 2-5"
+            )));
+        }
+
+        // Verify data length
+        let expected_len = 8 + (count * component_count as usize) * 8 + 8 + 8;
+        if data.len() != expected_len {
+            return Err(E2sError::Ssz(format!(
+                "Block index incorrect length: expected {expected_len}, got {}",
+                data.len()
+            )));
+        }
+
+        // Extract starting number
+        let starting_number = u64::from_le_bytes(
+            data[0..8]
+                .try_into()
+                .map_err(|_| E2sError::Ssz("Failed to read starting_number".to_string()))?,
+        );
+
+        // Extract offsets
+        let total_offsets = count * component_count as usize;
+        let mut offsets = Vec::with_capacity(total_offsets);
+        for i in 0..total_offsets {
+            let start = 8 + i * 8;
+            let end = start + 8;
+            let offset = i64::from_le_bytes(
+                data[start..end]
+                    .try_into()
+                    .map_err(|_| E2sError::Ssz(format!("Failed to read offset {i}")))?,
+            );
+            offsets.push(offset);
+        }
+
+        Ok(Self { starting_number, component_count, offsets })
     }
 }
 
@@ -204,38 +327,43 @@ mod tests {
     #[test]
     fn test_block_index_roundtrip() {
         let starting_number = 1000;
-        let offsets = vec![100, 200, 300, 400, 500];
+        let component_count = 4;
+        // 2 blocks, 4 components each = 8 offsets
+        let offsets = vec![100, 200, 300, 400, 500, 600, 700, 800];
 
-        let block_index = BlockIndex::new(starting_number, offsets.clone());
+        let block_index =
+            BlockIndex::new(starting_number, component_count, offsets.clone());
 
         let entry = block_index.to_entry();
-
-        // Validate entry type
         assert_eq!(entry.entry_type, BLOCK_INDEX);
 
-        // Convert back to block index
         let recovered = BlockIndex::from_entry(&entry).unwrap();
-
-        // Verify fields match
         assert_eq!(recovered.starting_number, starting_number);
+        assert_eq!(recovered.component_count, component_count);
         assert_eq!(recovered.offsets, offsets);
+        assert_eq!(recovered.block_count(), 2);
     }
 
     #[test]
     fn test_block_index_offset_lookup() {
         let starting_number = 1000;
-        let offsets = vec![100, 200, 300, 400, 500];
+        let component_count = 3;
+        // 3 blocks, 3 components each = 9 offsets
+        let offsets = vec![10, 20, 30, 40, 50, 60, 70, 80, 90];
 
-        let block_index = BlockIndex::new(starting_number, offsets);
+        let block_index = BlockIndex::new(starting_number, component_count, offsets);
 
-        // Test valid lookups
-        assert_eq!(block_index.offset_for_block(1000), Some(100));
-        assert_eq!(block_index.offset_for_block(1002), Some(300));
-        assert_eq!(block_index.offset_for_block(1004), Some(500));
+        // Block 1000: [10, 20, 30]
+        assert_eq!(block_index.offsets_for_block(1000), Some(&[10, 20, 30][..]));
+        assert_eq!(block_index.header_offset(1000), Some(10));
+        assert_eq!(block_index.body_offset(1000), Some(20));
 
-        // Test out of range lookups
-        assert_eq!(block_index.offset_for_block(999), None);
-        assert_eq!(block_index.offset_for_block(1005), None);
+        // Block 1002: [70, 80, 90]
+        assert_eq!(block_index.offsets_for_block(1002), Some(&[70, 80, 90][..]));
+
+        // Out of range
+        assert_eq!(block_index.offsets_for_block(999), None);
+        assert_eq!(block_index.offsets_for_block(1003), None);
     }
 
     #[test]
@@ -245,7 +373,7 @@ mod tests {
 
         let root_bytes = [0xDD; 32];
         let accumulator = Accumulator::new(B256::from(root_bytes));
-        let block_index = BlockIndex::new(1000, vec![100, 200, 300]);
+        let block_index = BlockIndex::new(1000, 2, vec![100, 200, 300, 400, 500, 600]);
 
         let erae_group = EraEGroup::new(blocks, accumulator.clone(), block_index);
 
@@ -254,7 +382,7 @@ mod tests {
         assert_eq!(erae_group.other_entries.len(), 0);
         assert_eq!(erae_group.accumulator.root, accumulator.root);
         assert_eq!(erae_group.block_index.starting_number, 1000);
-        assert_eq!(erae_group.block_index.offsets, vec![100, 200, 300]);
+        assert_eq!(erae_group.block_index.offsets, vec![100, 200, 300, 400, 500, 600]);
     }
 
     #[test]
@@ -264,7 +392,7 @@ mod tests {
         let root_bytes = [0xDD; 32];
         let accumulator = Accumulator::new(B256::from(root_bytes));
 
-        let block_index = BlockIndex::new(1000, vec![100]);
+        let block_index = BlockIndex::new(1000, 2, vec![100, 200]);
 
         // Create and verify group
         let mut erae_group = EraEGroup::new(blocks, accumulator, block_index);
@@ -295,7 +423,7 @@ mod tests {
         let accumulator = Accumulator::new(B256::from(root_bytes));
 
         // Create block index with different starting number
-        let block_index = BlockIndex::new(2000, vec![100, 200, 300]);
+        let block_index = BlockIndex::new(2000, 2, vec![100, 200, 300, 400, 500, 600]);
 
         // This should create a valid EraEGroup
         // even though the block numbers don't match the block index

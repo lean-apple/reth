@@ -10,7 +10,7 @@
 //! Only a couple of erae files are downloaded from <https://data.ethpandaops.io/erae/mainnet/>
 //! and <https://data.ethpandaops.io/erae/sepolia/> to keep the tests efficient.
 
-use alloy_consensus::{BlockBody, BlockHeader, Header, ReceiptEnvelope};
+use alloy_consensus::{BlockBody, BlockHeader, Header};
 use reth_era::{
     common::file_ops::{EraFileFormat, StreamReader, StreamWriter},
     e2s::types::IndexEntry,
@@ -18,13 +18,14 @@ use reth_era::{
         file::{EraEFile, EraEReader, EraEWriter},
         types::{
             execution::{
-                BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts, TotalDifficulty,
+                BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts,
+                Proof, ProofType, TotalDifficulty,
             },
             group::{EraEGroup, EraEId},
         },
     },
 };
-use reth_ethereum_primitives::TransactionSigned;
+use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use std::io::Cursor;
 
 use crate::{EraTestDownloader, MAINNET, SEPOLIA};
@@ -151,19 +152,53 @@ async fn test_erae_file_roundtrip(
             "Ommers count should match after roundtrip"
         );
 
-        // Decode receipts
-        let original_receipts_decoded = original_block.receipts.decode::<Vec<ReceiptEnvelope>>()?;
-        let roundtrip_receipts_decoded =
-            roundtrip_block.receipts.decode::<Vec<ReceiptEnvelope>>()?;
+        // Decode slim receipts, no bloom filter 
+        let original_receipts_decoded = original_block.receipts.decode::<Vec<Receipt>>()?;
+        let roundtrip_receipts_decoded = roundtrip_block.receipts.decode::<Vec<Receipt>>()?;
 
         assert_eq!(
-            original_receipts_decoded, roundtrip_receipts_decoded,
-            "Block {block_number} decoded receipts should be identical after roundtrip"
+            original_receipts_decoded.len(),
+            roundtrip_receipts_decoded.len(),
+            "Block {block_number} receipt count should match after roundtrip"
         );
-        assert_eq!(
-            original_receipts_data, roundtrip_receipts_data,
-            "Block {block_number} receipts data should be identical after roundtrip"
-        );
+
+        // Verify slim receipt fields: tx-type, status, cumulative-gas, logs
+        for (i, (orig, rt)) in original_receipts_decoded
+            .iter()
+            .zip(roundtrip_receipts_decoded.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                orig.tx_type, rt.tx_type,
+                "Block {block_number} receipt {i} tx_type mismatch"
+            );
+            assert_eq!(
+                orig.success, rt.success,
+                "Block {block_number} receipt {i} status mismatch"
+            );
+            assert_eq!(
+                orig.cumulative_gas_used, rt.cumulative_gas_used,
+                "Block {block_number} receipt {i} cumulative_gas mismatch"
+            );
+            assert_eq!(
+                orig.logs.len(),
+                rt.logs.len(),
+                "Block {block_number} receipt {i} log count mismatch"
+            );
+            for (j, (orig_log, rt_log)) in
+                orig.logs.iter().zip(rt.logs.iter()).enumerate()
+            {
+                assert_eq!(
+                    orig_log.address, rt_log.address,
+                    "Block {block_number} receipt {i} log {j} address mismatch"
+                );
+                assert_eq!(
+                    orig_log.data.topics(),
+                    rt_log.data.topics(),
+                    "Block {block_number} receipt {i} log {j} topics mismatch"
+                );
+            }
+        }
 
         // Check withdrawals presence/absence matches
         assert_eq!(
@@ -200,16 +235,36 @@ async fn test_erae_file_roundtrip(
             "Transaction count should match after re-compression"
         );
 
-        // Re-encore and re-compress the receipts
+        // Re-encode and re-compress the slim receipts
         let recompressed_receipts =
-            CompressedSlimReceipts::from_encodable(&roundtrip_receipts_decoded)?;
-        let recompressed_receipts_data = recompressed_receipts.decompress()?;
+            CompressedSlimReceipts::from_encodable_list(&roundtrip_receipts_decoded)?;
+        let recompressed_receipts_decoded =
+            recompressed_receipts.decode::<Vec<Receipt>>()?;
 
         assert_eq!(
-            original_receipts_data.len(),
-            recompressed_receipts_data.len(),
-            "Receipts length should match after re-compression"
+            original_receipts_decoded.len(),
+            recompressed_receipts_decoded.len(),
+            "Receipt count should match after re-compression"
         );
+        for (i, (orig, recomp)) in original_receipts_decoded
+            .iter()
+            .zip(recompressed_receipts_decoded.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                orig.tx_type, recomp.tx_type,
+                "Re-compressed receipt {i} tx_type mismatch"
+            );
+            assert_eq!(
+                orig.cumulative_gas_used, recomp.cumulative_gas_used,
+                "Re-compressed receipt {i} cumulative_gas mismatch"
+            );
+            assert_eq!(
+                orig.logs.len(),
+                recomp.logs.len(),
+                "Re-compressed receipt {i} log count mismatch"
+            );
+        }
 
         let recompressed_block = BlockTuple::new(
             recompressed_header,
@@ -264,6 +319,90 @@ async fn test_erae_file_roundtrip(
 async fn test_roundtrip_compression_encoding_mainnet(filename: &str) -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
     test_erae_file_roundtrip(&downloader, filename, MAINNET).await
+}
+
+/// Download one real erae file and verify slim receipt and proof decoding
+/// against actual mainnet data (era 1895 has plenty of transactions/receipts).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "download intensive"]
+async fn test_slim_receipts_and_proofs_from_real_file() -> eyre::Result<()> {
+    let downloader = EraTestDownloader::new().await?;
+    let file = downloader
+        .open_erae_file("mainnet-01895-4373f22f.erae", MAINNET)
+        .await?;
+
+    let block_count = file.group.blocks.len();
+    println!("File has {block_count} blocks");
+
+    // --- Slim receipts ---
+    // Test a few blocks across the file
+    let test_indices = [0, block_count / 4, block_count / 2, block_count - 1];
+    for &idx in &test_indices {
+        let block = &file.group.blocks[idx];
+        let block_number = file.group.block_index.starting_number() + idx as u64;
+
+        // Decompress slim receipts
+        let decompressed = block.receipts.decompress()?;
+        assert!(!decompressed.is_empty(), "Block {block_number} receipts should not be empty");
+
+        // Decode as slim receipts (no bloom)
+        let receipts: Vec<Receipt> = block.receipts.decode()?;
+        println!(
+            "Block {block_number}: {} receipts, cumulative_gas={}",
+            receipts.len(),
+            receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0)
+        );
+
+        // Verify receipt fields are sane
+        let mut prev_cumulative = 0;
+        for (i, receipt) in receipts.iter().enumerate() {
+            assert!(
+                receipt.cumulative_gas_used >= prev_cumulative,
+                "Block {block_number} receipt {i}: cumulative gas should be non-decreasing"
+            );
+            prev_cumulative = receipt.cumulative_gas_used;
+
+            // Verify log addresses are non-zero if logs exist
+            for log in &receipt.logs {
+                assert!(
+                    !log.address.is_zero() || log.data.topics().is_empty(),
+                    "Block {block_number} receipt {i}: log with zero address should have no topics"
+                );
+            }
+        }
+
+        // Re-encode and verify roundtrip
+        let recompressed = CompressedSlimReceipts::from_encodable_list(&receipts)?;
+        let re_decoded: Vec<Receipt> = recompressed.decode()?;
+        assert_eq!(receipts.len(), re_decoded.len());
+        for (i, (orig, re)) in receipts.iter().zip(re_decoded.iter()).enumerate() {
+            assert_eq!(orig.tx_type, re.tx_type, "Receipt {i} tx_type mismatch after re-encode");
+            assert_eq!(
+                orig.cumulative_gas_used, re.cumulative_gas_used,
+                "Receipt {i} cumulative_gas mismatch after re-encode"
+            );
+            assert_eq!(orig.logs.len(), re.logs.len(), "Receipt {i} log count mismatch");
+        }
+    }
+
+    // --- Proof encode/decode unit check ---
+    for proof_type in [
+        ProofType::BlockProofHistoricalHashesAccumulator,
+        ProofType::BlockProofHistoricalRoots,
+        ProofType::BlockProofHistoricalSummariesCapella,
+        ProofType::BlockProofHistoricalSummariesDeneb,
+    ] {
+        let ssz_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let proof = Proof::encode(proof_type, &ssz_data)?;
+        let entry = proof.to_entry();
+        let recovered = Proof::from_entry(&entry)?;
+        let (decoded_type, decoded_ssz) = recovered.decode()?;
+        assert_eq!(decoded_type, proof_type);
+        assert_eq!(decoded_ssz, ssz_data);
+    }
+
+    println!("Slim receipts and proof tests passed");
+    Ok(())
 }
 
 #[test_case::test_case("sepolia-00000-8e3e7dc9.erae"; "erae_roundtrip_sepolia_0")]

@@ -1,16 +1,19 @@
-//! Era and Era1 files support for Ethereum history expiry.
+//! Era and EraE files support for Ethereum history expiry.
 //!
-//! Era1 files use the same e2store foundation but are specialized for
-//! execution layer block history, following the format:
-//! Version | block-tuple* | other-entries* | Accumulator | `BlockIndex`
+//! EraE (Ere) files store execution layer block history for both pre-merge and
+//! post-merge data, following the format:
+//! `Version | CompressedHeader+ | CompressedBody+ | CompressedSlimReceipts+ | Proofs+ |
+//! TotalDifficulty* | other-entries* | Accumulator? | BlockIndex`
 //!
-//! Era files are special instances of `.e2s` files with a strict content format
+//! Era files store consensus layer beacon chain data.
+//!
+//! Both are special instances of `.e2s` files with strict content formats
 //! optimized for reading and long-term storage and distribution.
 //!
 //! See also:
 //! - E2store format: <https://github.com/status-im/nimbus-eth2/blob/stable/docs/e2store.md>
 //! - Era format: <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era.md>
-//! - Era1 format: <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md>
+//! - EraE format: <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md>
 
 pub mod common;
 pub mod e2s;

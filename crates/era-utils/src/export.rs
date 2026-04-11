@@ -7,7 +7,6 @@ use alloy_primitives::{BlockNumber, B256, U256};
 use eyre::{eyre, Result};
 use reth_era::{
     common::file_ops::{EraFileId, StreamWriter},
-    e2s::types::IndexEntry,
     erae::{
         file::EraEWriter,
         types::{
@@ -163,7 +162,8 @@ where
         let mut writer = EraEWriter::new(file);
         writer.write_version()?;
 
-        let mut offsets = Vec::<i64>::with_capacity(block_count);
+        let component_count = 4u64; // header + body + receipts + td
+        let mut offsets = Vec::<i64>::with_capacity(block_count * component_count as usize);
         let mut position = VERSION_ENTRY_SIZE as i64;
         let mut blocks_written = 0;
         let mut final_header_data = Vec::new();
@@ -185,11 +185,10 @@ where
 
             let difficulty = TotalDifficulty::new(total_difficulty);
 
-            let header_size = compressed_header.data.len() + ENTRY_HEADER_SIZE;
-            let body_size = compressed_body.data.len() + ENTRY_HEADER_SIZE;
-            let receipts_size = compressed_receipts.data.len() + ENTRY_HEADER_SIZE;
-            let difficulty_size = 32 + ENTRY_HEADER_SIZE; // U256 is 32 + 8 bytes header overhead
-            let total_size = (header_size + body_size + receipts_size + difficulty_size) as i64;
+            let header_size = (compressed_header.data.len() + ENTRY_HEADER_SIZE) as i64;
+            let body_size = (compressed_body.data.len() + ENTRY_HEADER_SIZE) as i64;
+            let receipts_size = (compressed_receipts.data.len() + ENTRY_HEADER_SIZE) as i64;
+            let difficulty_size = (32 + ENTRY_HEADER_SIZE) as i64;
 
             let block_tuple = BlockTuple::new(
                 compressed_header,
@@ -198,8 +197,12 @@ where
                 difficulty,
             );
 
-            offsets.push(position);
-            position += total_size;
+            // Track per-component offsets
+            offsets.push(position); // header
+            offsets.push(position + header_size); // body
+            offsets.push(position + header_size + body_size); // receipts
+            offsets.push(position + header_size + body_size + receipts_size); // td
+            position += header_size + body_size + receipts_size + difficulty_size;
 
             writer.write_block(&block_tuple)?;
             blocks_written += 1;
@@ -221,7 +224,7 @@ where
             let accumulator_hash =
                 B256::from_slice(&final_header_data[0..32.min(final_header_data.len())]);
             let accumulator = Accumulator::new(accumulator_hash);
-            let block_index = BlockIndex::new(start_block, offsets);
+            let block_index = BlockIndex::new(start_block, component_count, offsets);
 
             writer.write_accumulator(&accumulator)?;
             writer.write_block_index(&block_index)?;
