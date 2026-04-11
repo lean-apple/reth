@@ -395,8 +395,7 @@ impl Proof {
     /// Encode a [`Proof`] from a proof type and raw SSZ-encoded proof object.
     pub fn encode(proof_type: ProofType, ssz_proof: &[u8]) -> Result<Self, E2sError> {
         let mut rlp_data = Vec::new();
-        let header =
-            alloy_rlp::Header { list: true, payload_length: 1 + ssz_proof.length() };
+        let header = alloy_rlp::Header { list: true, payload_length: 1 + ssz_proof.length() };
         header.encode(&mut rlp_data);
         proof_type.as_byte().encode(&mut rlp_data);
         ssz_proof.encode(&mut rlp_data);
@@ -418,9 +417,8 @@ impl Proof {
 
         let proof_type_byte = u8::decode(&mut buf)
             .map_err(|e| E2sError::Rlp(format!("Failed to decode proof type: {e}")))?;
-        let proof_type = ProofType::from_byte(proof_type_byte).ok_or_else(|| {
-            E2sError::Rlp(format!("Unknown proof type: {proof_type_byte}"))
-        })?;
+        let proof_type = ProofType::from_byte(proof_type_byte)
+            .ok_or_else(|| E2sError::Rlp(format!("Unknown proof type: {proof_type_byte}")))?;
 
         let ssz_bytes = alloy_primitives::Bytes::decode(&mut buf)
             .map_err(|e| E2sError::Rlp(format!("Failed to decode proof SSZ bytes: {e}")))?;
@@ -444,7 +442,6 @@ impl Proof {
         Ok(Self { data: entry.data.clone() })
     }
 }
-
 
 /// Compress raw bytes with Snappy framed encoding
 fn snappy_compress(data: &[u8]) -> Result<Vec<u8>, E2sError> {
@@ -726,8 +723,8 @@ mod tests {
         let test_receipt = create_test_receipt(TxType::Eip1559, true, 21000, 2);
 
         // Compress the receipt
-        let compressed_receipts =
-            CompressedSlimReceipts::from_encodable(&test_receipt).expect("Failed to compress receipt");
+        let compressed_receipts = CompressedSlimReceipts::from_encodable(&test_receipt)
+            .expect("Failed to compress receipt");
 
         // Verify compression
         assert!(!compressed_receipts.data.is_empty());

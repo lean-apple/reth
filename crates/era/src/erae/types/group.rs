@@ -151,9 +151,7 @@ impl BlockIndex {
 
         // Need at least: starting-number(8) + component-count(8) + count(8) = 24 bytes
         if entry.data.len() < 24 {
-            return Err(E2sError::Ssz(
-                "Block index too short: need at least 24 bytes".to_string(),
-            ));
+            return Err(E2sError::Ssz("Block index too short: need at least 24 bytes".to_string()));
         }
 
         let data = &entry.data;
@@ -331,8 +329,7 @@ mod tests {
         // 2 blocks, 4 components each = 8 offsets
         let offsets = vec![100, 200, 300, 400, 500, 600, 700, 800];
 
-        let block_index =
-            BlockIndex::new(starting_number, component_count, offsets.clone());
+        let block_index = BlockIndex::new(starting_number, component_count, offsets.clone());
 
         let entry = block_index.to_entry();
         assert_eq!(entry.entry_type, BLOCK_INDEX);

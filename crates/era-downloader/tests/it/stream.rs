@@ -33,8 +33,7 @@ async fn test_streaming_files_after_fetching_file_list(url: &str) {
 
 #[tokio::test]
 async fn test_streaming_erae_files_after_fetching_file_list_into_missing_folder_fails() {
-    let base_url =
-        Url::from_str("https://data.ethpandaops.io/erae/mainnet/").unwrap();
+    let base_url = Url::from_str("https://data.ethpandaops.io/erae/mainnet/").unwrap();
     let folder = tempdir().unwrap().path().to_owned();
     let client = EraClient::new(StubClient, base_url, folder);
 
@@ -51,7 +50,7 @@ async fn test_streaming_erae_files_after_fetching_file_list_into_missing_folder_
 
 #[tokio::test]
 async fn test_streaming_era_files_after_fetching_file_list_into_missing_folder_fails() {
-     let base_url = Url::from_str("https://mainnet.era.nimbus.team").unwrap(); //TODO: change once ithaca host era files
+    let base_url = Url::from_str("https://mainnet.era.nimbus.team").unwrap(); //TODO: change once ithaca host era files
     let folder = tempdir().unwrap().path().to_owned();
     let client = EraClient::new(StubClient, base_url, folder);
 

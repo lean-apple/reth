@@ -35,8 +35,7 @@ impl HttpClient for ClientWithFakeIndex {
         match url.as_str() {
             MAINNET_ERAE_INDEX_URL => {
                 // Create a static stream without boxing
-                let stream =
-                    stream::iter(vec![Ok(Bytes::from_static(GENESIS_INDEX_RESPONSE))]);
+                let stream = stream::iter(vec![Ok(Bytes::from_static(GENESIS_INDEX_RESPONSE))]);
                 Ok(Either::Left(stream))
             }
             _ => {

@@ -18,8 +18,8 @@ use reth_era::{
         file::{EraEFile, EraEReader, EraEWriter},
         types::{
             execution::{
-                BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts,
-                Proof, ProofType, TotalDifficulty,
+                BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts, Proof,
+                ProofType, TotalDifficulty,
             },
             group::{EraEGroup, EraEId},
         },
@@ -152,7 +152,7 @@ async fn test_erae_file_roundtrip(
             "Ommers count should match after roundtrip"
         );
 
-        // Decode slim receipts, no bloom filter 
+        // Decode slim receipts, no bloom filter
         let original_receipts_decoded = original_block.receipts.decode::<Vec<Receipt>>()?;
         let roundtrip_receipts_decoded = roundtrip_block.receipts.decode::<Vec<Receipt>>()?;
 
@@ -163,10 +163,8 @@ async fn test_erae_file_roundtrip(
         );
 
         // Verify slim receipt fields: tx-type, status, cumulative-gas, logs
-        for (i, (orig, rt)) in original_receipts_decoded
-            .iter()
-            .zip(roundtrip_receipts_decoded.iter())
-            .enumerate()
+        for (i, (orig, rt)) in
+            original_receipts_decoded.iter().zip(roundtrip_receipts_decoded.iter()).enumerate()
         {
             assert_eq!(
                 orig.tx_type, rt.tx_type,
@@ -185,9 +183,7 @@ async fn test_erae_file_roundtrip(
                 rt.logs.len(),
                 "Block {block_number} receipt {i} log count mismatch"
             );
-            for (j, (orig_log, rt_log)) in
-                orig.logs.iter().zip(rt.logs.iter()).enumerate()
-            {
+            for (j, (orig_log, rt_log)) in orig.logs.iter().zip(rt.logs.iter()).enumerate() {
                 assert_eq!(
                     orig_log.address, rt_log.address,
                     "Block {block_number} receipt {i} log {j} address mismatch"
@@ -238,23 +234,17 @@ async fn test_erae_file_roundtrip(
         // Re-encode and re-compress the slim receipts
         let recompressed_receipts =
             CompressedSlimReceipts::from_encodable_list(&roundtrip_receipts_decoded)?;
-        let recompressed_receipts_decoded =
-            recompressed_receipts.decode::<Vec<Receipt>>()?;
+        let recompressed_receipts_decoded = recompressed_receipts.decode::<Vec<Receipt>>()?;
 
         assert_eq!(
             original_receipts_decoded.len(),
             recompressed_receipts_decoded.len(),
             "Receipt count should match after re-compression"
         );
-        for (i, (orig, recomp)) in original_receipts_decoded
-            .iter()
-            .zip(recompressed_receipts_decoded.iter())
-            .enumerate()
+        for (i, (orig, recomp)) in
+            original_receipts_decoded.iter().zip(recompressed_receipts_decoded.iter()).enumerate()
         {
-            assert_eq!(
-                orig.tx_type, recomp.tx_type,
-                "Re-compressed receipt {i} tx_type mismatch"
-            );
+            assert_eq!(orig.tx_type, recomp.tx_type, "Re-compressed receipt {i} tx_type mismatch");
             assert_eq!(
                 orig.cumulative_gas_used, recomp.cumulative_gas_used,
                 "Re-compressed receipt {i} cumulative_gas mismatch"
@@ -327,9 +317,7 @@ async fn test_roundtrip_compression_encoding_mainnet(filename: &str) -> eyre::Re
 #[ignore = "download intensive"]
 async fn test_slim_receipts_and_proofs_from_real_file() -> eyre::Result<()> {
     let downloader = EraTestDownloader::new().await?;
-    let file = downloader
-        .open_erae_file("mainnet-01895-4373f22f.erae", MAINNET)
-        .await?;
+    let file = downloader.open_erae_file("mainnet-01895-4373f22f.erae", MAINNET).await?;
 
     let block_count = file.group.blocks.len();
     println!("File has {block_count} blocks");

@@ -16,8 +16,8 @@ use crate::{
     erae::types::{
         execution::{
             Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts,
-            TotalDifficulty, ACCUMULATOR, COMPRESSED_BODY, COMPRESSED_HEADER, COMPRESSED_SLIM_RECEIPTS,
-            MAX_BLOCKS_PER_ERAE, TOTAL_DIFFICULTY,
+            TotalDifficulty, ACCUMULATOR, COMPRESSED_BODY, COMPRESSED_HEADER,
+            COMPRESSED_SLIM_RECEIPTS, MAX_BLOCKS_PER_ERAE, TOTAL_DIFFICULTY,
         },
         group::{BlockIndex, EraEGroup, EraEId, BLOCK_INDEX},
     },

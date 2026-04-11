@@ -13,7 +13,8 @@ use futures::Stream;
 use reqwest::IntoUrl;
 use reth_era_downloader::HttpClient;
 
-pub(crate) const ERAE_ETHPANDAOPS: &[u8] = include_bytes!("../res/erae-files/erae-ethpandaops.html");
+pub(crate) const ERAE_ETHPANDAOPS: &[u8] =
+    include_bytes!("../res/erae-files/erae-ethpandaops.html");
 pub(crate) const ERAE_CHECKSUMS: &[u8] = include_bytes!("../res/erae-files/erae-checksums.txt");
 pub(crate) const ERAE_MAINNET_0: &[u8] =
     include_bytes!("../res/erae-files/mainnet-00000-a6860fef.erae");
