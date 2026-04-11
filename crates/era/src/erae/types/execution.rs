@@ -103,7 +103,7 @@ pub const TOTAL_DIFFICULTY: [u8; 2] = [0x06, 0x00];
 /// `Accumulator` record type
 pub const ACCUMULATOR: [u8; 2] = [0x07, 0x00];
 
-/// Maximum number of blocks in an EraE file, limited by accumulator size
+/// Maximum number of blocks in an `EraE` file, limited by accumulator size
 pub const MAX_BLOCKS_PER_ERAE: usize = 8192;
 
 /// Generic codec for Snappy-framed-compressed RLP data
@@ -551,7 +551,7 @@ impl Accumulator {
     }
 }
 
-/// A block tuple in an EraE file, containing all components for a single block
+/// A block tuple in an `EraE` file, containing all components for a single block
 #[derive(Debug, Clone)]
 pub struct BlockTuple {
     /// Compressed block header

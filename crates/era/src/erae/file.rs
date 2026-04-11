@@ -1,6 +1,6 @@
-//! Represents a complete EraE file
+//! Represents a complete `EraE` file
 //!
-//! The structure of an EraE file follows the specification:
+//! The structure of an `EraE` file follows the specification:
 //! `Version | CompressedHeader+ | CompressedBody+ | CompressedSlimReceipts+ | Proofs+ |
 //! TotalDifficulty* | other-entries* | Accumulator? | BlockIndex`
 //!
@@ -29,13 +29,13 @@ use std::{
     io::{Read, Seek, Write},
 };
 
-/// EraE file interface
+/// `EraE` file interface
 #[derive(Debug)]
 pub struct EraEFile {
     /// Version record, must be the first record in the file
     pub version: Version,
 
-    /// Main content group of the EraE file
+    /// Main content group of the `EraE` file
     pub group: EraEGroup,
 
     /// File identifier
@@ -72,7 +72,7 @@ impl EraEFile {
     }
 
     /// Get the range of block numbers contained in this file
-    pub fn block_range(&self) -> std::ops::RangeInclusive<BlockNumber> {
+    pub const fn block_range(&self) -> std::ops::RangeInclusive<BlockNumber> {
         let start = self.group.block_index.starting_number();
         let end = start + (self.group.blocks.len() as u64) - 1;
         start..=end
@@ -84,7 +84,7 @@ impl EraEFile {
     }
 }
 
-/// Reader for EraE files that builds on top of [`E2StoreReader`]
+/// Reader for `EraE` files that builds on top of [`E2StoreReader`]
 #[derive(Debug)]
 pub struct EraEReader<R: Read> {
     reader: E2StoreReader<R>,
@@ -199,7 +199,7 @@ impl<R: Read + Seek> StreamReader<R> for EraEReader<R> {
 }
 
 impl<R: Read + Seek> EraEReader<R> {
-    /// Reads and parses an EraE file from the underlying reader, assembling all components
+    /// Reads and parses an `EraE` file from the underlying reader, assembling all components
     /// into a complete [`EraEFile`] with an [`EraEId`] that includes the provided network name.
     pub fn read_and_assemble(mut self, network_name: String) -> Result<EraEFile, E2sError> {
         // Validate version entry
@@ -259,7 +259,7 @@ impl<R: Read + Seek> EraEReader<R> {
 
 impl FileReader for EraEReader<File> {}
 
-/// Writer for EraE files that builds on top of [`E2StoreWriter`]
+/// Writer for `EraE` files that builds on top of [`E2StoreWriter`]
 #[derive(Debug)]
 pub struct EraEWriter<W: Write> {
     writer: E2StoreWriter<W>,

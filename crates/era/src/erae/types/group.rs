@@ -1,4 +1,4 @@
-//! EraE group for erae file content
+//! `EraE` group for erae file content
 //!
 //! See also <https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md>
 
@@ -12,7 +12,7 @@ use alloy_primitives::BlockNumber;
 /// `BlockIndex` record: ['g', '2']
 pub const BLOCK_INDEX: [u8; 2] = [0x67, 0x32];
 
-/// File content in an EraE file
+/// File content in an `EraE` file
 ///
 /// Format: `block-tuple* | other-entries* | Accumulator | BlockIndex`
 #[derive(Debug)]
@@ -46,7 +46,7 @@ impl EraEGroup {
     }
 }
 
-/// EraE block index with dynamic component count.
+/// `EraE` block index with dynamic component count.
 ///
 /// Format:
 /// `starting-number | indexes | indexes | ... | component-count | count`
@@ -64,13 +64,13 @@ pub struct BlockIndex {
     component_count: u64,
 
     /// Flat array of offsets: `[h0, b0, (r0)?, (d0)?, (p0)?, h1, b1, ...]`
-    /// Length = block_count * component_count
+    /// Length = `block_count` * `component_count`
     offsets: Vec<i64>,
 }
 
 impl BlockIndex {
     /// Create a new [`BlockIndex`] with the given component count
-    pub fn new(starting_number: u64, component_count: u64, offsets: Vec<i64>) -> Self {
+    pub const fn new(starting_number: u64, component_count: u64, offsets: Vec<i64>) -> Self {
         Self { starting_number, component_count, offsets }
     }
 
@@ -85,7 +85,7 @@ impl BlockIndex {
     }
 
     /// Get the number of blocks in this index
-    pub fn block_count(&self) -> usize {
+    pub const fn block_count(&self) -> usize {
         if self.component_count == 0 {
             return 0;
         }
@@ -211,7 +211,7 @@ impl BlockIndex {
     }
 }
 
-/// EraE file identifier
+/// `EraE` file identifier
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EraEId {
     /// Network configuration name

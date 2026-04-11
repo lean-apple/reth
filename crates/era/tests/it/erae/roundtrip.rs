@@ -13,7 +13,6 @@
 use alloy_consensus::{BlockBody, BlockHeader, Header};
 use reth_era::{
     common::file_ops::{EraFileFormat, StreamReader, StreamWriter},
-    e2s::types::IndexEntry,
     erae::{
         file::{EraEFile, EraEReader, EraEWriter},
         types::{

@@ -169,7 +169,7 @@ pub enum EraFileType {
     /// Consensus layer ERA file, `.era`
     /// Contains beacon blocks and states
     Era,
-    /// Execution layer EraE file, `.erae`
+    /// Execution layer `EraE` file, `.erae`
     /// Contains execution blocks for both pre-merge and post-merge
     EraE,
 }
