@@ -45,7 +45,7 @@ pub fn increase_thread_priority() {
 /// Should be called once after tracing is initialized.
 ///
 /// No-op on non-Linux platforms.
-pub const fn deprioritize_background_threads() {
+pub fn deprioritize_background_threads() {
     #[cfg(target_os = "linux")]
     _deprioritize_background_threads();
 }
@@ -56,7 +56,7 @@ const DEPRIORITIZE_THREAD_PREFIXES: &[&str] =
     &["OpenTelemetry.T", "tracing-appende", "reqwest-interna"];
 
 #[cfg(target_os = "linux")]
-const fn _deprioritize_background_threads() {
+fn _deprioritize_background_threads() {
     let pid = std::process::id();
     let task_dir = format!("/proc/{pid}/task");
 

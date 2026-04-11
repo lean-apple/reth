@@ -165,10 +165,8 @@ async fn test_erae_file_roundtrip(
                 "Block {block_number} receipt count should match after roundtrip"
             );
 
-            for (i, (orig, rt)) in original_receipts_decoded
-                .iter()
-                .zip(roundtrip_receipts_decoded.iter())
-                .enumerate()
+            for (i, (orig, rt)) in
+                original_receipts_decoded.iter().zip(roundtrip_receipts_decoded.iter()).enumerate()
             {
                 assert_eq!(
                     orig.tx_type, rt.tx_type,
@@ -204,9 +202,7 @@ async fn test_erae_file_roundtrip(
                 original_receipts_decoded.len()
             );
         } else {
-            println!(
-                "Block {block_number}: pre-Byzantium receipts (raw bytes verified)"
-            );
+            println!("Block {block_number}: pre-Byzantium receipts (raw bytes verified)");
         }
 
         // Check withdrawals presence/absence matches
