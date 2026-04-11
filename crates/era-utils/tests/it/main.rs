@@ -6,11 +6,11 @@ use reqwest::{Client, IntoUrl};
 use reth_era_downloader::HttpClient;
 use tokio_util::either::Either;
 
-// Url where the ERAE files are hosted
-const ITHACA_ERA_INDEX_URL: &str = "https://era.ithaca.xyz/erae/index.html";
+// Url where the EraE files are hosted
+const MAINNET_ERAE_INDEX_URL: &str = "https://data.ethpandaops.io/erae/mainnet/index.html";
 
 // The response containing one file that the fake client will return when the index Url is requested
-const GENESIS_ITHACA_INDEX_RESPONSE: &[u8] = b"<a href=\"https://era.ithaca.xyz/erae/mainnet-00000-5ec1ffb8.erae\">mainnet-00000-5ec1ffb8.erae</a>";
+const GENESIS_INDEX_RESPONSE: &[u8] = b"<a href=\"https://data.ethpandaops.io/erae/mainnet/mainnet-00000-a6860fef.erae\">mainnet-00000-a6860fef.erae</a>";
 
 mod genesis;
 mod history;
@@ -33,10 +33,10 @@ impl HttpClient for ClientWithFakeIndex {
         let url = url.into_url()?;
 
         match url.as_str() {
-            ITHACA_ERA_INDEX_URL => {
+            MAINNET_ERAE_INDEX_URL => {
                 // Create a static stream without boxing
                 let stream =
-                    stream::iter(vec![Ok(Bytes::from_static(GENESIS_ITHACA_INDEX_RESPONSE))]);
+                    stream::iter(vec![Ok(Bytes::from_static(GENESIS_INDEX_RESPONSE))]);
                 Ok(Either::Left(stream))
             }
             _ => {

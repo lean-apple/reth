@@ -7,8 +7,8 @@
 //! - Writing the data back to a new file
 //! - Confirming that all original data is preserved throughout the process
 //!
-//! Only a couple of erae files are downloaded from <https://era.ithaca.xyz/erae/> for mainnet
-//! and <https://era.ithaca.xyz/sepolia-erae/> for sepolia to keep the tests efficient.
+//! Only a couple of erae files are downloaded from <https://data.ethpandaops.io/erae/mainnet/>
+//! and <https://data.ethpandaops.io/erae/sepolia/> to keep the tests efficient.
 
 use alloy_consensus::{BlockBody, BlockHeader, Header, ReceiptEnvelope};
 use reth_era::{
@@ -18,7 +18,7 @@ use reth_era::{
         file::{EraEFile, EraEReader, EraEWriter},
         types::{
             execution::{
-                BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
+                BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts, TotalDifficulty,
             },
             group::{EraEGroup, EraEId},
         },
@@ -202,7 +202,7 @@ async fn test_erae_file_roundtrip(
 
         // Re-encore and re-compress the receipts
         let recompressed_receipts =
-            CompressedReceipts::from_encodable(&roundtrip_receipts_decoded)?;
+            CompressedSlimReceipts::from_encodable(&roundtrip_receipts_decoded)?;
         let recompressed_receipts_data = recompressed_receipts.decompress()?;
 
         assert_eq!(
@@ -255,10 +255,10 @@ async fn test_erae_file_roundtrip(
     Ok(())
 }
 
-#[test_case::test_case("mainnet-00000-5ec1ffb8.erae"; "erae_roundtrip_mainnet_0")]
-#[test_case::test_case("mainnet-00151-e322efe1.erae"; "erae_roundtrip_mainnet_151")]
-#[test_case::test_case("mainnet-01367-d7efc68f.erae"; "erae_roundtrip_mainnet_1367")]
-#[test_case::test_case("mainnet-01895-3f81607c.erae"; "erae_roundtrip_mainnet_1895")]
+#[test_case::test_case("mainnet-00000-a6860fef.erae"; "erae_roundtrip_mainnet_0")]
+#[test_case::test_case("mainnet-00151-126e861b.erae"; "erae_roundtrip_mainnet_151")]
+#[test_case::test_case("mainnet-01367-fa634aec.erae"; "erae_roundtrip_mainnet_1367")]
+#[test_case::test_case("mainnet-01895-4373f22f.erae"; "erae_roundtrip_mainnet_1895")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "download intensive"]
 async fn test_roundtrip_compression_encoding_mainnet(filename: &str) -> eyre::Result<()> {
@@ -266,10 +266,10 @@ async fn test_roundtrip_compression_encoding_mainnet(filename: &str) -> eyre::Re
     test_erae_file_roundtrip(&downloader, filename, MAINNET).await
 }
 
-#[test_case::test_case("sepolia-00000-643a00f7.erae"; "erae_roundtrip_sepolia_0")]
-#[test_case::test_case("sepolia-00074-0e81003c.erae"; "erae_roundtrip_sepolia_74")]
-#[test_case::test_case("sepolia-00173-b6924da5.erae"; "erae_roundtrip_sepolia_173")]
-#[test_case::test_case("sepolia-00182-a4f0a8a1.erae"; "erae_roundtrip_sepolia_182")]
+#[test_case::test_case("sepolia-00000-8e3e7dc9.erae"; "erae_roundtrip_sepolia_0")]
+#[test_case::test_case("sepolia-00074-3d475575.erae"; "erae_roundtrip_sepolia_74")]
+#[test_case::test_case("sepolia-00173-b0373953.erae"; "erae_roundtrip_sepolia_173")]
+#[test_case::test_case("sepolia-00182-959852e5.erae"; "erae_roundtrip_sepolia_182")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "download intensive"]
 async fn test_roundtrip_compression_encoding_sepolia(filename: &str) -> eyre::Result<()> {

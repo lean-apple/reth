@@ -54,7 +54,7 @@ impl TryFromChain for ChainKind {
                 Url::parse("https://era.ithaca.xyz/era1/index.html").expect("URL should be valid")
             }
             ChainKind::Named(NamedChain::Sepolia) => {
-                Url::parse("https://era.ithaca.xyz/sepolia-era1/index.html")
+                Url::parse("https://data.ethpandaops.io/erae/sepolia/index.html")
                     .expect("URL should be valid")
             }
             chain => return Err(eyre!("No known host for ERA files on chain {chain:?}")),

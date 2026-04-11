@@ -33,20 +33,20 @@ const fn main() {}
 const MAINNET: &str = "mainnet";
 /// Default mainnet url
 /// for downloading mainnet `.erae` files
-const ERAE_MAINNET_URL: &str = "https://era.ithaca.xyz/erae/";
+const ERAE_MAINNET_URL: &str = "https://data.ethpandaops.io/erae/mainnet/";
 
 /// Succinct list of mainnet files we want to download
-/// from <https://era.ithaca.xyz/erae/>
+/// from <https://data.ethpandaops.io/erae/mainnet/>
 /// for testing purposes
 const ERAE_MAINNET_FILES_NAMES: [&str; 8] = [
-    "mainnet-00000-5ec1ffb8.erae",
-    "mainnet-00003-d8b8a40b.erae",
-    "mainnet-00151-e322efe1.erae",
-    "mainnet-00293-0d6c5812.erae",
-    "mainnet-00443-ea71b6f9.erae",
-    "mainnet-01367-d7efc68f.erae",
-    "mainnet-01610-99fdde4b.erae",
-    "mainnet-01895-3f81607c.erae",
+    "mainnet-00000-a6860fef.erae",
+    "mainnet-00003-14c8639d.erae",
+    "mainnet-00151-126e861b.erae",
+    "mainnet-00293-6c3fd372.erae",
+    "mainnet-00443-c791ac46.erae",
+    "mainnet-01367-fa634aec.erae",
+    "mainnet-01610-2a0f5993.erae",
+    "mainnet-01895-4373f22f.erae",
 ];
 
 /// Sepolia network name
@@ -54,16 +54,16 @@ const SEPOLIA: &str = "sepolia";
 
 /// Default sepolia url
 /// for downloading sepolia `.erae` files
-const ERAE_SEPOLIA_URL: &str = "https://era.ithaca.xyz/sepolia-erae/";
+const ERAE_SEPOLIA_URL: &str = "https://data.ethpandaops.io/erae/sepolia/";
 
 /// Succinct list of sepolia files we want to download
-/// from <https://era.ithaca.xyz/sepolia-erae/>
+/// from <https://data.ethpandaops.io/erae/sepolia/>
 /// for testing purposes
 const ERAE_SEPOLIA_FILES_NAMES: [&str; 4] = [
-    "sepolia-00000-643a00f7.erae",
-    "sepolia-00074-0e81003c.erae",
-    "sepolia-00173-b6924da5.erae",
-    "sepolia-00182-a4f0a8a1.erae",
+    "sepolia-00000-8e3e7dc9.erae",
+    "sepolia-00074-3d475575.erae",
+    "sepolia-00173-b0373953.erae",
+    "sepolia-00182-959852e5.erae",
 ];
 
 const HOODI: &str = "hoodi";

@@ -1,4 +1,4 @@
-use crate::{ClientWithFakeIndex, ITHACA_ERA_INDEX_URL};
+use crate::{ClientWithFakeIndex, MAINNET_ERAE_INDEX_URL};
 use reqwest::{Client, Url};
 use reth_db_common::init::init_genesis;
 use reth_era::erae::types::execution::MAX_BLOCKS_PER_ERAE;
@@ -18,7 +18,7 @@ const EXPORT_LAST_BLOCK: u64 = EXPORT_FIRST_BLOCK + EXPORT_TOTAL_BLOCKS - 1;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_history_imports_from_fresh_state_successfully() {
     // URL where the ERAE files are hosted
-    let url = Url::from_str(ITHACA_ERA_INDEX_URL).unwrap();
+    let url = Url::from_str(MAINNET_ERAE_INDEX_URL).unwrap();
 
     // Directory where the ERAE files will be downloaded to
     let folder = tempdir().unwrap();
@@ -51,7 +51,7 @@ async fn test_history_imports_from_fresh_state_successfully() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_roundtrip_export_after_import() {
     // URL where the ERAE files are hosted
-    let url = Url::from_str(ITHACA_ERA_INDEX_URL).unwrap();
+    let url = Url::from_str(MAINNET_ERAE_INDEX_URL).unwrap();
     let download_folder = tempdir().unwrap();
     let download_folder = download_folder.path().to_owned().into_boxed_path();
 

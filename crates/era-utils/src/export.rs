@@ -12,7 +12,7 @@ use reth_era::{
         file::EraEWriter,
         types::{
             execution::{
-                Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts,
+                Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts,
                 TotalDifficulty, MAX_BLOCKS_PER_ERAE,
             },
             group::{BlockIndex, EraEId},
@@ -286,7 +286,7 @@ fn compress_block_data<P>(
     header: P::Header,
     expected_block_number: BlockNumber,
     total_difficulty: &mut U256,
-) -> Result<(CompressedHeader, CompressedBody, CompressedReceipts)>
+) -> Result<(CompressedHeader, CompressedBody, CompressedSlimReceipts)>
 where
     P: BlockReader,
 {
@@ -310,7 +310,7 @@ where
 
     let compressed_header = CompressedHeader::from_header(&header)?;
     let compressed_body = CompressedBody::from_body(&body)?;
-    let compressed_receipts = CompressedReceipts::from_encodable_list(&receipts)
+    let compressed_receipts = CompressedSlimReceipts::from_encodable_list(&receipts)
         .map_err(|e| eyre!("Failed to compress receipts: {}", e))?;
 
     Ok((compressed_header, compressed_body, compressed_receipts))

@@ -9,8 +9,8 @@ use crate::{
 };
 use alloy_primitives::BlockNumber;
 
-/// `BlockIndex` record: ['f', '2']
-pub const BLOCK_INDEX: [u8; 2] = [0x66, 0x32];
+/// `BlockIndex` record: ['g', '2']
+pub const BLOCK_INDEX: [u8; 2] = [0x67, 0x32];
 
 /// File content in an EraE file
 ///

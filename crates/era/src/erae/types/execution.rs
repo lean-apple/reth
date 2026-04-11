@@ -3,7 +3,7 @@
 //! Contains implementations for compressed execution layer data structures:
 //! - [`CompressedHeader`] - Block header
 //! - [`CompressedBody`] - Block body
-//! - [`CompressedReceipts`] - Block receipts
+//! - [`CompressedSlimReceipts`] - Block receipts
 //! - [`TotalDifficulty`] - Block total difficulty
 //!
 //! These types use Snappy compression to match the specification.
@@ -49,12 +49,12 @@
 //! # Ok::<(), reth_era::e2s::error::E2sError>(())
 //! ```
 //!
-//! ## [`CompressedReceipts`]
+//! ## [`CompressedSlimReceipts`]
 //!
 //! ```rust
 //! use alloy_consensus::{Eip658Value, Receipt, ReceiptEnvelope, ReceiptWithBloom};
 //! use reth_era::{
-//!     common::decode::DecodeCompressedRlp, erae::types::execution::CompressedReceipts,
+//!     common::decode::DecodeCompressedRlp, erae::types::execution::CompressedSlimReceipts,
 //! };
 //!
 //! let receipt =
@@ -62,7 +62,7 @@
 //! let receipt_with_bloom = ReceiptWithBloom::new(receipt, Default::default());
 //! let enveloped_receipt = ReceiptEnvelope::Legacy(receipt_with_bloom);
 //! // Compress the receipt: rlp encoding and snappy compression
-//! let compressed_receipt_data = CompressedReceipts::from_encodable(&enveloped_receipt)?;
+//! let compressed_receipt_data = CompressedSlimReceipts::from_encodable(&enveloped_receipt)?;
 //! // Get raw receipt by decoding and decompressing compressed and encoded receipt
 //! let decompressed_receipt = compressed_receipt_data.decode::<ReceiptEnvelope>()?;
 //! assert_eq!(decompressed_receipt.cumulative_gas_used(), 21000);
@@ -89,8 +89,13 @@ pub const COMPRESSED_HEADER: [u8; 2] = [0x03, 0x00];
 /// `CompressedBody` record type
 pub const COMPRESSED_BODY: [u8; 2] = [0x04, 0x00];
 
-/// `CompressedReceipts` record type
-pub const COMPRESSED_RECEIPTS: [u8; 2] = [0x05, 0x00];
+/// `CompressedSlimReceipts` record type (0x0a00)
+/// Slim receipts exclude bloom filters to optimize storage.
+pub const COMPRESSED_SLIM_RECEIPTS: [u8; 2] = [0x0a, 0x00];
+
+/// `Proof` record type (0x0b00)
+/// Format: `snappyFramed(rlp([proof-type, ssz(proof-object)]))`
+pub const PROOF: [u8; 2] = [0x0b, 0x00];
 
 /// `TotalDifficulty` record type
 pub const TOTAL_DIFFICULTY: [u8; 2] = [0x06, 0x00];
@@ -101,7 +106,7 @@ pub const ACCUMULATOR: [u8; 2] = [0x07, 0x00];
 /// Maximum number of blocks in an EraE file, limited by accumulator size
 pub const MAX_BLOCKS_PER_ERAE: usize = 8192;
 
-/// Generic codec for Snappy-compressed RLP data
+/// Generic codec for Snappy-framed-compressed RLP data
 #[derive(Debug, Clone, Default)]
 pub struct SnappyRlpCodec<T> {
     _phantom: PhantomData<T>,
@@ -117,12 +122,7 @@ impl<T> SnappyRlpCodec<T> {
 impl<T: Decodable> SnappyRlpCodec<T> {
     /// Decode compressed data into the target type
     pub fn decode(&self, compressed_data: &[u8]) -> Result<T, E2sError> {
-        let mut decoder = FrameDecoder::new(compressed_data);
-        let mut decompressed = Vec::new();
-        Read::read_to_end(&mut decoder, &mut decompressed).map_err(|e| {
-            E2sError::SnappyDecompression(format!("Failed to decompress data: {e}"))
-        })?;
-
+        let decompressed = snappy_decompress(compressed_data)?;
         let mut slice = decompressed.as_slice();
         T::decode(&mut slice).map_err(|e| E2sError::Rlp(format!("Failed to decode RLP data: {e}")))
     }
@@ -133,21 +133,7 @@ impl<T: Encodable> SnappyRlpCodec<T> {
     pub fn encode(&self, data: &T) -> Result<Vec<u8>, E2sError> {
         let mut rlp_data = Vec::new();
         data.encode(&mut rlp_data);
-
-        let mut compressed = Vec::new();
-        {
-            let mut encoder = FrameEncoder::new(&mut compressed);
-
-            Write::write_all(&mut encoder, &rlp_data).map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to compress data: {e}"))
-            })?;
-
-            encoder.flush().map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to flush encoder: {e}"))
-            })?;
-        }
-
-        Ok(compressed)
+        snappy_compress(&rlp_data)
     }
 }
 
@@ -164,32 +150,14 @@ impl CompressedHeader {
         Self { data }
     }
 
-    /// Create from RLP-encoded header by compressing it with Snappy
+    /// Create from RLP-encoded header by compressing it with Snappy framed encoding
     pub fn from_rlp(rlp_data: &[u8]) -> Result<Self, E2sError> {
-        let mut compressed = Vec::new();
-        {
-            let mut encoder = FrameEncoder::new(&mut compressed);
-
-            Write::write_all(&mut encoder, rlp_data).map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to compress header: {e}"))
-            })?;
-
-            encoder.flush().map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to flush encoder: {e}"))
-            })?;
-        }
-        Ok(Self { data: compressed })
+        Ok(Self { data: snappy_compress(rlp_data)? })
     }
 
     /// Decompress to get the original RLP-encoded header
     pub fn decompress(&self) -> Result<Vec<u8>, E2sError> {
-        let mut decoder = FrameDecoder::new(self.data.as_slice());
-        let mut decompressed = Vec::new();
-        Read::read_to_end(&mut decoder, &mut decompressed).map_err(|e| {
-            E2sError::SnappyDecompression(format!("Failed to decompress header: {e}"))
-        })?;
-
-        Ok(decompressed)
+        snappy_decompress(&self.data)
     }
 
     /// Convert to an [`Entry`]
@@ -245,32 +213,14 @@ impl CompressedBody {
         Self { data }
     }
 
-    /// Create from RLP-encoded body by compressing it with Snappy
+    /// Create from RLP-encoded body by compressing it with Snappy framed encoding
     pub fn from_rlp(rlp_data: &[u8]) -> Result<Self, E2sError> {
-        let mut compressed = Vec::new();
-        {
-            let mut encoder = FrameEncoder::new(&mut compressed);
-
-            Write::write_all(&mut encoder, rlp_data).map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to compress body: {e}"))
-            })?;
-
-            encoder.flush().map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to flush encoder: {e}"))
-            })?;
-        }
-        Ok(Self { data: compressed })
+        Ok(Self { data: snappy_compress(rlp_data)? })
     }
 
     /// Decompress to get the original RLP-encoded body
     pub fn decompress(&self) -> Result<Vec<u8>, E2sError> {
-        let mut decoder = FrameDecoder::new(self.data.as_slice());
-        let mut decompressed = Vec::new();
-        Read::read_to_end(&mut decoder, &mut decompressed).map_err(|e| {
-            E2sError::SnappyDecompression(format!("Failed to decompress body: {e}"))
-        })?;
-
-        Ok(decompressed)
+        snappy_decompress(&self.data)
     }
 
     /// Convert to an [`Entry`]
@@ -319,57 +269,43 @@ impl DecodeCompressedRlp for CompressedBody {
     }
 }
 
-/// Compressed receipts using snappyFramed(rlp(receipts))
+/// Compressed slim receipts using `snappyFramed(rlp(...))`.
+///
+/// Slim receipts exclude bloom filters to optimize storage.
+/// Format: `snappyFramed(rlp([tx-type, post-state-or-status, cumulative-gas, logs]))`
 #[derive(Debug, Clone)]
-pub struct CompressedReceipts {
+pub struct CompressedSlimReceipts {
     /// The compressed data
     pub data: Vec<u8>,
 }
 
-impl CompressedReceipts {
-    /// Create a new [`CompressedReceipts`] from compressed data
+impl CompressedSlimReceipts {
+    /// Create a new [`CompressedSlimReceipts`] from compressed data
     pub const fn new(data: Vec<u8>) -> Self {
         Self { data }
     }
 
-    /// Create from RLP-encoded receipts by compressing it with Snappy
+    /// Create from RLP-encoded slim receipts by compressing with Snappy framed encoding
     pub fn from_rlp(rlp_data: &[u8]) -> Result<Self, E2sError> {
-        let mut compressed = Vec::new();
-        {
-            let mut encoder = FrameEncoder::new(&mut compressed);
-
-            Write::write_all(&mut encoder, rlp_data).map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to compress receipts: {e}"))
-            })?;
-
-            encoder.flush().map_err(|e| {
-                E2sError::SnappyCompression(format!("Failed to flush encoder: {e}"))
-            })?;
-        }
-        Ok(Self { data: compressed })
+        Ok(Self { data: snappy_compress(rlp_data)? })
     }
-    /// Decompress to get the original RLP-encoded receipts
-    pub fn decompress(&self) -> Result<Vec<u8>, E2sError> {
-        let mut decoder = FrameDecoder::new(self.data.as_slice());
-        let mut decompressed = Vec::new();
-        Read::read_to_end(&mut decoder, &mut decompressed).map_err(|e| {
-            E2sError::SnappyDecompression(format!("Failed to decompress receipts: {e}"))
-        })?;
 
-        Ok(decompressed)
+    /// Decompress to get the original RLP-encoded slim receipts
+    pub fn decompress(&self) -> Result<Vec<u8>, E2sError> {
+        snappy_decompress(&self.data)
     }
 
     /// Convert to an [`Entry`]
     pub fn to_entry(&self) -> Entry {
-        Entry::new(COMPRESSED_RECEIPTS, self.data.clone())
+        Entry::new(COMPRESSED_SLIM_RECEIPTS, self.data.clone())
     }
 
     /// Create from an [`Entry`]
     pub fn from_entry(entry: &Entry) -> Result<Self, E2sError> {
-        if entry.entry_type != COMPRESSED_RECEIPTS {
+        if entry.entry_type != COMPRESSED_SLIM_RECEIPTS {
             return Err(E2sError::Ssz(format!(
-                "Invalid entry type for CompressedReceipts: expected {:02x}{:02x}, got {:02x}{:02x}",
-                COMPRESSED_RECEIPTS[0], COMPRESSED_RECEIPTS[1],
+                "Invalid entry type for CompressedSlimReceipts: expected {:02x}{:02x}, got {:02x}{:02x}",
+                COMPRESSED_SLIM_RECEIPTS[0], COMPRESSED_SLIM_RECEIPTS[1],
                 entry.entry_type[0], entry.entry_type[1]
             )));
         }
@@ -377,37 +313,160 @@ impl CompressedReceipts {
         Ok(Self { data: entry.data.clone() })
     }
 
-    /// Decode this [`CompressedReceipts`] into the given type
+    /// Decode this [`CompressedSlimReceipts`] into the given type
     pub fn decode<T: Decodable>(&self) -> Result<T, E2sError> {
         let decoder = SnappyRlpCodec::<T>::new();
         decoder.decode(&self.data)
     }
 
-    /// Create [`CompressedReceipts`] from an encodable type
+    /// Create [`CompressedSlimReceipts`] from an encodable type
     pub fn from_encodable<T: Encodable>(data: &T) -> Result<Self, E2sError> {
         let encoder = SnappyRlpCodec::<T>::new();
         let compressed = encoder.encode(data)?;
         Ok(Self::new(compressed))
     }
-    /// Encode a list of receipts to RLP format
-    pub fn encode_receipts_to_rlp<T: Encodable>(receipts: &[T]) -> Result<Vec<u8>, E2sError> {
+
+    /// Encode and compress a list of slim receipts
+    pub fn from_encodable_list<T: Encodable>(receipts: &[T]) -> Result<Self, E2sError> {
         let mut rlp_data = Vec::new();
         alloy_rlp::encode_list(receipts, &mut rlp_data);
-        Ok(rlp_data)
-    }
-
-    /// Encode and compress a list of receipts
-    pub fn from_encodable_list<T: Encodable>(receipts: &[T]) -> Result<Self, E2sError> {
-        let rlp_data = Self::encode_receipts_to_rlp(receipts)?;
         Self::from_rlp(&rlp_data)
     }
 }
 
-impl DecodeCompressedRlp for CompressedReceipts {
+impl DecodeCompressedRlp for CompressedSlimReceipts {
     fn decode<T: Decodable>(&self) -> Result<T, E2sError> {
         let decoder = SnappyRlpCodec::<T>::new();
         decoder.decode(&self.data)
     }
+}
+
+/// Proof type discriminant used inside the Proof entry's RLP envelope.
+///
+/// Maps to specific Portal Network proof objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProofType {
+    /// Pre-merge proof against the historical hashes accumulator
+    BlockProofHistoricalHashesAccumulator = 0,
+    /// Post-merge proof against historical roots
+    BlockProofHistoricalRoots = 1,
+    /// Capella-era proof against historical summaries
+    BlockProofHistoricalSummariesCapella = 2,
+    /// Deneb-era proof against historical summaries
+    BlockProofHistoricalSummariesDeneb = 3,
+}
+
+impl ProofType {
+    /// Convert from a raw byte value
+    pub const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::BlockProofHistoricalHashesAccumulator),
+            1 => Some(Self::BlockProofHistoricalRoots),
+            2 => Some(Self::BlockProofHistoricalSummariesCapella),
+            3 => Some(Self::BlockProofHistoricalSummariesDeneb),
+            _ => None,
+        }
+    }
+
+    /// Convert to a raw byte value
+    pub const fn as_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+/// A proof entry attesting to block validity against a trusted consensus layer header.
+///
+/// Format: `snappyFramed(rlp([proof-type, ssz(proof-object)]))`
+///
+/// Multiple proof types can coexist in the same file at fork boundaries.
+#[derive(Debug, Clone)]
+pub struct Proof {
+    /// The compressed data containing `rlp([proof-type, ssz(proof-object)])`
+    pub data: Vec<u8>,
+}
+
+impl Proof {
+    /// Create a new [`Proof`] from already-compressed data
+    pub const fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
+    /// Encode a [`Proof`] from a proof type and raw SSZ-encoded proof object.
+    pub fn encode(proof_type: ProofType, ssz_proof: &[u8]) -> Result<Self, E2sError> {
+        let mut rlp_data = Vec::new();
+        let header =
+            alloy_rlp::Header { list: true, payload_length: 1 + ssz_proof.length() };
+        header.encode(&mut rlp_data);
+        proof_type.as_byte().encode(&mut rlp_data);
+        ssz_proof.encode(&mut rlp_data);
+
+        let compressed = snappy_compress(&rlp_data)?;
+        Ok(Self { data: compressed })
+    }
+
+    /// Decode the proof, returning `(proof_type, raw_ssz_proof_bytes)`.
+    pub fn decode(&self) -> Result<(ProofType, Vec<u8>), E2sError> {
+        let decompressed = snappy_decompress(&self.data)?;
+
+        let mut buf = decompressed.as_slice();
+        let header = alloy_rlp::Header::decode(&mut buf)
+            .map_err(|e| E2sError::Rlp(format!("Failed to decode proof RLP header: {e}")))?;
+        if !header.list {
+            return Err(E2sError::Rlp("Expected RLP list for Proof entry".to_string()));
+        }
+
+        let proof_type_byte = u8::decode(&mut buf)
+            .map_err(|e| E2sError::Rlp(format!("Failed to decode proof type: {e}")))?;
+        let proof_type = ProofType::from_byte(proof_type_byte).ok_or_else(|| {
+            E2sError::Rlp(format!("Unknown proof type: {proof_type_byte}"))
+        })?;
+
+        let ssz_bytes = alloy_primitives::Bytes::decode(&mut buf)
+            .map_err(|e| E2sError::Rlp(format!("Failed to decode proof SSZ bytes: {e}")))?;
+
+        Ok((proof_type, ssz_bytes.to_vec()))
+    }
+
+    /// Convert to an [`Entry`]
+    pub fn to_entry(&self) -> Entry {
+        Entry::new(PROOF, self.data.clone())
+    }
+
+    /// Create from an [`Entry`]
+    pub fn from_entry(entry: &Entry) -> Result<Self, E2sError> {
+        if entry.entry_type != PROOF {
+            return Err(E2sError::Ssz(format!(
+                "Invalid entry type for Proof: expected {:02x}{:02x}, got {:02x}{:02x}",
+                PROOF[0], PROOF[1], entry.entry_type[0], entry.entry_type[1]
+            )));
+        }
+        Ok(Self { data: entry.data.clone() })
+    }
+}
+
+
+/// Compress raw bytes with Snappy framed encoding
+fn snappy_compress(data: &[u8]) -> Result<Vec<u8>, E2sError> {
+    let mut compressed = Vec::new();
+    {
+        let mut encoder = FrameEncoder::new(&mut compressed);
+        Write::write_all(&mut encoder, data)
+            .map_err(|e| E2sError::SnappyCompression(format!("Failed to compress: {e}")))?;
+        encoder
+            .flush()
+            .map_err(|e| E2sError::SnappyCompression(format!("Failed to flush encoder: {e}")))?;
+    }
+    Ok(compressed)
+}
+
+/// Decompress raw bytes with Snappy framed encoding
+fn snappy_decompress(data: &[u8]) -> Result<Vec<u8>, E2sError> {
+    let mut decoder = FrameDecoder::new(data);
+    let mut decompressed = Vec::new();
+    Read::read_to_end(&mut decoder, &mut decompressed)
+        .map_err(|e| E2sError::SnappyDecompression(format!("Failed to decompress: {e}")))?;
+    Ok(decompressed)
 }
 
 /// Total difficulty for a block
@@ -505,7 +564,7 @@ pub struct BlockTuple {
     pub body: CompressedBody,
 
     /// Compressed receipts
-    pub receipts: CompressedReceipts,
+    pub receipts: CompressedSlimReceipts,
 
     /// Total difficulty
     pub total_difficulty: TotalDifficulty,
@@ -516,7 +575,7 @@ impl BlockTuple {
     pub const fn new(
         header: CompressedHeader,
         body: CompressedBody,
-        receipts: CompressedReceipts,
+        receipts: CompressedSlimReceipts,
         total_difficulty: TotalDifficulty,
     ) -> Self {
         Self { header, body, receipts, total_difficulty }
@@ -539,7 +598,7 @@ impl BlockTuple {
         let header = CompressedHeader::from_header(&block.header)?;
         let body = CompressedBody::from_body(&block.body)?;
 
-        let compressed_receipts = CompressedReceipts::from_encodable(receipts)?;
+        let compressed_receipts = CompressedSlimReceipts::from_encodable(receipts)?;
 
         let difficulty = TotalDifficulty::new(total_difficulty);
 
@@ -628,7 +687,7 @@ mod tests {
         assert_eq!(decompressed, rlp_data);
 
         // Test receipts compression/decompression
-        let compressed_receipts = CompressedReceipts::from_rlp(&rlp_data).unwrap();
+        let compressed_receipts = CompressedSlimReceipts::from_rlp(&rlp_data).unwrap();
         let decompressed = compressed_receipts.decompress().unwrap();
         assert_eq!(decompressed, rlp_data);
     }
@@ -668,7 +727,7 @@ mod tests {
 
         // Compress the receipt
         let compressed_receipts =
-            CompressedReceipts::from_encodable(&test_receipt).expect("Failed to compress receipt");
+            CompressedSlimReceipts::from_encodable(&test_receipt).expect("Failed to compress receipt");
 
         // Verify compression
         assert!(!compressed_receipts.data.is_empty());
@@ -696,7 +755,7 @@ mod tests {
         let receipts = create_test_receipts();
 
         // Compress the list of receipts
-        let compressed_receipts = CompressedReceipts::from_encodable_list(&receipts)
+        let compressed_receipts = CompressedSlimReceipts::from_encodable_list(&receipts)
             .expect("Failed to compress receipt list");
 
         // Decode the compressed receipts back

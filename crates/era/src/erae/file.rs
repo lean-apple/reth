@@ -14,8 +14,8 @@ use crate::{
     },
     erae::types::{
         execution::{
-            Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts,
-            TotalDifficulty, ACCUMULATOR, COMPRESSED_BODY, COMPRESSED_HEADER, COMPRESSED_RECEIPTS,
+            Accumulator, BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts,
+            TotalDifficulty, ACCUMULATOR, COMPRESSED_BODY, COMPRESSED_HEADER, COMPRESSED_SLIM_RECEIPTS,
             MAX_BLOCKS_PER_ERAE, TOTAL_DIFFICULTY,
         },
         group::{BlockIndex, EraEGroup, EraEId, BLOCK_INDEX},
@@ -95,7 +95,7 @@ pub struct BlockTupleIterator<R: Read> {
     reader: E2StoreReader<R>,
     headers: VecDeque<CompressedHeader>,
     bodies: VecDeque<CompressedBody>,
-    receipts: VecDeque<CompressedReceipts>,
+    receipts: VecDeque<CompressedSlimReceipts>,
     difficulties: VecDeque<TotalDifficulty>,
     other_entries: Vec<Entry>,
     accumulator: Option<Accumulator>,
@@ -139,8 +139,8 @@ impl<R: Read + Seek> BlockTupleIterator<R> {
                 COMPRESSED_BODY => {
                     self.bodies.push_back(CompressedBody::from_entry(&entry)?);
                 }
-                COMPRESSED_RECEIPTS => {
-                    self.receipts.push_back(CompressedReceipts::from_entry(&entry)?);
+                COMPRESSED_SLIM_RECEIPTS => {
+                    self.receipts.push_back(CompressedSlimReceipts::from_entry(&entry)?);
                 }
                 TOTAL_DIFFICULTY => {
                     self.difficulties.push_back(TotalDifficulty::from_entry(&entry)?);
@@ -420,7 +420,7 @@ mod tests {
         let body = CompressedBody::new(body_data);
 
         let receipts_data = vec![((number + 2) % 256) as u8; data_size];
-        let receipts = CompressedReceipts::new(receipts_data);
+        let receipts = CompressedSlimReceipts::new(receipts_data);
 
         let difficulty = TotalDifficulty::new(U256::from(number * 1000));
 

@@ -3,6 +3,12 @@ use reth_chainspec::{ChainKind, NamedChain};
 use std::path::Path;
 use url::Url;
 
+/// Erae url for mainnet.
+const MAINNET_ERAE_URL: &str = "https://data.ethpandaops.io/erae/mainnet/index.html";
+
+/// Erae url for sepolia.
+const SEPOLIA_ERAE_URL: &str = "https://data.ethpandaops.io/erae/sepolia/index.html";
+
 /// Syncs ERA1 encoded blocks from a local or remote source.
 #[derive(Clone, Debug, Default, Args)]
 pub struct EraArgs {
@@ -50,11 +56,10 @@ impl DefaultEraHost for ChainKind {
     fn default_era_host(&self) -> Option<Url> {
         Some(match self {
             Self::Named(NamedChain::Mainnet) => {
-                Url::parse("https://era.ithaca.xyz/era1/index.html").expect("URL should be valid")
+                Url::parse(MAINNET_ERAE_URL).expect("URL should be valid")
             }
             Self::Named(NamedChain::Sepolia) => {
-                Url::parse("https://era.ithaca.xyz/sepolia-era1/index.html")
-                    .expect("URL should be valid")
+                Url::parse(SEPOLIA_ERAE_URL).expect("URL should be valid")
             }
             _ => return None,
         })

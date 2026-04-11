@@ -3,7 +3,7 @@
 use crate::{
     era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock},
     erae::types::execution::{
-        BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
+        BlockTuple, CompressedBody, CompressedHeader, CompressedSlimReceipts, TotalDifficulty,
     },
 };
 use alloy_consensus::{Header, ReceiptWithBloom};
@@ -101,7 +101,7 @@ pub(crate) fn create_sample_block(data_size: usize) -> BlockTuple {
 
     // Create compressed receipts with very sample data - not compressed for simplicity
     let receipts_data = vec![0xCC; data_size];
-    let receipts = CompressedReceipts::new(receipts_data);
+    let receipts = CompressedSlimReceipts::new(receipts_data);
 
     let difficulty = TotalDifficulty::new(U256::from(data_size));
 
@@ -158,7 +158,7 @@ pub(crate) fn create_test_block_with_compressed_data(number: BlockNumber) -> Blo
     // Compressed test compressed
     let compressed_header = CompressedHeader::from_header(&header).unwrap();
     let compressed_body = CompressedBody::from_body(&body).unwrap();
-    let compressed_receipts = CompressedReceipts::from_encodable_list(&receipts_list).unwrap();
+    let compressed_receipts = CompressedSlimReceipts::from_encodable_list(&receipts_list).unwrap();
     let total_difficulty = TotalDifficulty::new(U256::from(number * 1000));
 
     BlockTuple::new(compressed_header, compressed_body, compressed_receipts, total_difficulty)
