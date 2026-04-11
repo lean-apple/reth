@@ -165,13 +165,16 @@ impl<R: Read + Seek> BlockTupleIterator<R> {
 
             if !self.headers.is_empty() &&
                 !self.bodies.is_empty() &&
-                !self.receipts.is_empty() &&
-                !self.difficulties.is_empty()
+                !self.receipts.is_empty()
             {
                 let header = self.headers.pop_front().unwrap();
                 let body = self.bodies.pop_front().unwrap();
                 let receipt = self.receipts.pop_front().unwrap();
-                let difficulty = self.difficulties.pop_front().unwrap();
+                // Difficulties are optional (post-merge files have none)
+                let difficulty = self
+                    .difficulties
+                    .pop_front()
+                    .unwrap_or(TotalDifficulty::new(alloy_primitives::U256::ZERO));
 
                 return Ok(Some(BlockTuple::new(header, body, receipt, difficulty)));
             }
@@ -209,36 +212,84 @@ impl<R: Read + Seek> EraEReader<R> {
             None => return Err(E2sError::Ssz("Empty EraE file".to_string())),
         };
 
-        let mut iter = self.iter();
-        let blocks = (&mut iter).collect::<Result<Vec<_>, _>>()?;
+        // Read all entries into separate vecs by type.
+        // EraE groups entries by type (all headers, then all bodies, etc.)
+        // so we can't use a streaming iterator that expects interleaved tuples.
+        let mut headers = Vec::new();
+        let mut bodies = Vec::new();
+        let mut receipts = Vec::new();
+        let mut difficulties = Vec::new();
+        let mut other_entries = Vec::new();
+        let mut accumulator = None;
+        let mut block_index = None;
 
-        let BlockTupleIterator {
-            headers,
-            bodies,
-            receipts,
-            difficulties,
-            other_entries,
-            accumulator,
-            block_index,
-            ..
-        } = iter;
+        while let Some(entry) = self.reader.read_next_entry()? {
+            match entry.entry_type {
+                COMPRESSED_HEADER => {
+                    headers.push(CompressedHeader::from_entry(&entry)?);
+                }
+                COMPRESSED_BODY => {
+                    bodies.push(CompressedBody::from_entry(&entry)?);
+                }
+                COMPRESSED_SLIM_RECEIPTS => {
+                    receipts.push(CompressedSlimReceipts::from_entry(&entry)?);
+                }
+                TOTAL_DIFFICULTY => {
+                    difficulties.push(TotalDifficulty::from_entry(&entry)?);
+                }
+                ACCUMULATOR => {
+                    if accumulator.is_some() {
+                        return Err(E2sError::Ssz(
+                            "Multiple accumulator entries found".to_string(),
+                        ));
+                    }
+                    accumulator = Some(Accumulator::from_entry(&entry)?);
+                }
+                BLOCK_INDEX => {
+                    if block_index.is_some() {
+                        return Err(E2sError::Ssz(
+                            "Multiple block index entries found".to_string(),
+                        ));
+                    }
+                    block_index = Some(BlockIndex::from_entry(&entry)?);
+                }
+                _ => {
+                    other_entries.push(entry);
+                }
+            }
+        }
 
-        // Ensure we have matching counts for block components
-        if headers.len() != bodies.len() ||
-            headers.len() != receipts.len() ||
-            headers.len() != difficulties.len()
-        {
+        // Headers and bodies are required and must match
+        if headers.len() != bodies.len() {
             return Err(E2sError::Ssz(format!(
-                "Mismatched block component counts: headers={}, bodies={}, receipts={}, difficulties={}",
-                headers.len(), bodies.len(), receipts.len(), difficulties.len()
+                "Mismatched header/body counts: headers={}, bodies={}",
+                headers.len(),
+                bodies.len()
             )));
         }
 
-        let accumulator = accumulator
-            .ok_or_else(|| E2sError::Ssz("EraE file missing accumulator entry".to_string()))?;
-
         let block_index = block_index
             .ok_or_else(|| E2sError::Ssz("EraE file missing block index entry".to_string()))?;
+
+        // Zip components into BlockTuples
+        let blocks: Vec<BlockTuple> = headers
+            .into_iter()
+            .zip(bodies)
+            .enumerate()
+            .map(|(i, (header, body))| {
+                let receipt = if i < receipts.len() {
+                    receipts[i].clone()
+                } else {
+                    CompressedSlimReceipts::new(vec![])
+                };
+                let difficulty = if i < difficulties.len() {
+                    difficulties[i].clone()
+                } else {
+                    TotalDifficulty::new(alloy_primitives::U256::ZERO)
+                };
+                BlockTuple::new(header, body, receipt, difficulty)
+            })
+            .collect();
 
         let mut group = EraEGroup::new(blocks, accumulator, block_index.clone());
 
@@ -314,8 +365,10 @@ impl<W: Write> StreamWriter<W> for EraEWriter<W> {
             self.writer.write_entry(entry)?;
         }
 
-        // Write accumulator
-        self.write_accumulator(&erae_file.group.accumulator)?;
+        // Write accumulator (optional, pre-merge only)
+        if let Some(accumulator) = &erae_file.group.accumulator {
+            self.write_accumulator(accumulator)?;
+        }
 
         // Write block index
         self.write_block_index(&erae_file.group.block_index)?;
@@ -441,7 +494,7 @@ mod tests {
             blocks.push(create_test_block(block_num, 32));
         }
 
-        let accumulator = Accumulator::new(B256::from([0xAA; 32]));
+        let accumulator = Some(Accumulator::new(B256::from([0xAA; 32])));
 
         let component_count = 4u64; // header + body + receipts + td
         let mut offsets = Vec::with_capacity(block_count * component_count as usize);

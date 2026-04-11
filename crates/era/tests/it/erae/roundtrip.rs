@@ -71,8 +71,8 @@ async fn test_erae_file_roundtrip(
         "Block count should match after roundtrip"
     );
     assert_eq!(
-        original_file.group.accumulator.root, roundtrip_file.group.accumulator.root,
-        "Accumulator root should match after roundtrip"
+        original_file.group.accumulator, roundtrip_file.group.accumulator,
+        "Accumulator should match after roundtrip"
     );
 
     // Test individual blocks

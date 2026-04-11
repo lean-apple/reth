@@ -223,10 +223,12 @@ where
         if blocks_written > 0 {
             let accumulator_hash =
                 B256::from_slice(&final_header_data[0..32.min(final_header_data.len())]);
-            let accumulator = Accumulator::new(accumulator_hash);
+            let accumulator = Some(Accumulator::new(accumulator_hash));
             let block_index = BlockIndex::new(start_block, component_count, offsets);
 
-            writer.write_accumulator(&accumulator)?;
+            if let Some(ref acc) = accumulator {
+                writer.write_accumulator(acc)?;
+            }
             writer.write_block_index(&block_index)?;
             writer.flush()?;
 

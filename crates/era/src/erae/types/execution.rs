@@ -511,7 +511,7 @@ impl TotalDifficulty {
 
 /// Accumulator is computed by constructing an SSZ list of header-records
 /// and calculating the `hash_tree_root`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accumulator {
     /// The accumulator root hash
     pub root: B256,

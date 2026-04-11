@@ -23,8 +23,9 @@ pub struct EraEGroup {
     /// Other entries that don't fit into the standard categories
     pub other_entries: Vec<Entry>,
 
-    /// Accumulator is hash tree root of block headers and difficulties
-    pub accumulator: Accumulator,
+    /// Accumulator is hash tree root of block headers and difficulties.
+    /// Optional: only present for epochs with pre-merge data.
+    pub accumulator: Option<Accumulator>,
 
     /// Block index, required
     pub block_index: BlockIndex,
@@ -34,7 +35,7 @@ impl EraEGroup {
     /// Create a new [`EraEGroup`]
     pub const fn new(
         blocks: Vec<BlockTuple>,
-        accumulator: Accumulator,
+        accumulator: Option<Accumulator>,
         block_index: BlockIndex,
     ) -> Self {
         Self { blocks, accumulator, block_index, other_entries: Vec::new() }
@@ -372,12 +373,12 @@ mod tests {
         let accumulator = Accumulator::new(B256::from(root_bytes));
         let block_index = BlockIndex::new(1000, 2, vec![100, 200, 300, 400, 500, 600]);
 
-        let erae_group = EraEGroup::new(blocks, accumulator.clone(), block_index);
+        let erae_group = EraEGroup::new(blocks, Some(accumulator.clone()), block_index);
 
         // Verify initial state
         assert_eq!(erae_group.blocks.len(), 3);
         assert_eq!(erae_group.other_entries.len(), 0);
-        assert_eq!(erae_group.accumulator.root, accumulator.root);
+        assert_eq!(erae_group.accumulator.unwrap().root, accumulator.root);
         assert_eq!(erae_group.block_index.starting_number, 1000);
         assert_eq!(erae_group.block_index.offsets, vec![100, 200, 300, 400, 500, 600]);
     }
@@ -392,7 +393,7 @@ mod tests {
         let block_index = BlockIndex::new(1000, 2, vec![100, 200]);
 
         // Create and verify group
-        let mut erae_group = EraEGroup::new(blocks, accumulator, block_index);
+        let mut erae_group = EraEGroup::new(blocks, Some(accumulator), block_index);
         assert_eq!(erae_group.other_entries.len(), 0);
 
         // Create custom entries with different types
@@ -425,7 +426,7 @@ mod tests {
         // This should create a valid EraEGroup
         // even though the block numbers don't match the block index
         // validation not at the erae group level
-        let erae_group = EraEGroup::new(blocks, accumulator, block_index);
+        let erae_group = EraEGroup::new(blocks, Some(accumulator), block_index);
 
         // Verify the mismatch exists but the group was created
         assert_eq!(erae_group.blocks.len(), 3);
