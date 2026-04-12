@@ -274,7 +274,7 @@ pub enum Commands<
     /// This syncs ERA encoded blocks from a directory.
     #[command(name = "import-era")]
     ImportEra(import_era::ImportEraCommand<C>),
-    /// Exports block to era1 files in a specified directory.
+    /// Exports block to erae files in a specified directory.
     #[command(name = "export-era")]
     ExportEra(export_era::ExportEraCommand<C>),
     /// Dumps genesis block JSON configuration to stdout.

@@ -66,7 +66,7 @@ use tokio::sync::watch;
 /// - [`FinishStage`]
 ///
 /// This expands to the following series of stages:
-/// - [`EraStage`] (optional, for ERA1 import)
+/// - [`EraStage`] (optional, for `EraE` import)
 /// - [`HeaderStage`]
 /// - [`BodyStage`]
 /// - [`SenderRecoveryStage`]
@@ -201,7 +201,7 @@ where
     body_downloader: B,
     /// Configuration for each stage in the pipeline
     stages_config: StageConfig,
-    /// Optional source of ERA1 files. The `EraStage` does nothing unless this is specified.
+    /// Optional source of `EraE` files. The `EraStage` does nothing unless this is specified.
     era_import_source: Option<EraImportSource>,
 }
 

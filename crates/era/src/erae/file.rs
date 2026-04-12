@@ -163,10 +163,7 @@ impl<R: Read + Seek> BlockTupleIterator<R> {
                 }
             }
 
-            if !self.headers.is_empty() &&
-                !self.bodies.is_empty() &&
-                !self.receipts.is_empty()
-            {
+            if !self.headers.is_empty() && !self.bodies.is_empty() && !self.receipts.is_empty() {
                 let header = self.headers.pop_front().unwrap();
                 let body = self.bodies.pop_front().unwrap();
                 let receipt = self.receipts.pop_front().unwrap();
@@ -239,17 +236,13 @@ impl<R: Read + Seek> EraEReader<R> {
                 }
                 ACCUMULATOR => {
                     if accumulator.is_some() {
-                        return Err(E2sError::Ssz(
-                            "Multiple accumulator entries found".to_string(),
-                        ));
+                        return Err(E2sError::Ssz("Multiple accumulator entries found".to_string()));
                     }
                     accumulator = Some(Accumulator::from_entry(&entry)?);
                 }
                 BLOCK_INDEX => {
                     if block_index.is_some() {
-                        return Err(E2sError::Ssz(
-                            "Multiple block index entries found".to_string(),
-                        ));
+                        return Err(E2sError::Ssz("Multiple block index entries found".to_string()));
                     }
                     block_index = Some(BlockIndex::from_entry(&entry)?);
                 }

@@ -44,14 +44,14 @@ The defaults shipped with Reth try to be relatively reasonable, but may not be o
 
 ### `era`
 
-The ERA stage configures pre-synced ERA1 data ingestion, either from a local directory or a remote host.
+The ERA stage configures pre-synced ERAE data ingestion, either from a local directory or a remote host.
 
 ```toml
 [stages.era]
-# Use a local directory containing ERA1 files (conflicts with `url`)
-path = "/path/to/era1"
-# Or download ERA1 files from a host (conflicts with `path`)
-# url = "https://example.com/era1/"
+# Use a local directory containing ERAE files (conflicts with `url`)
+path = "/path/to/erae"
+# Or download ERAE files from a host (conflicts with `path`)
+# url = "https://example.com/erae/"
 # When using `url`, specify a temporary download folder
 # folder = "/path/to/reth/era"
 ```

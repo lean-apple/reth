@@ -175,7 +175,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         count
     }
 
-    /// Fetches the list of ERA1/ERA files from `url` and stores it in a file located within
+    /// Fetches the list of EraE/ERA files from `url` and stores it in a file located within
     /// `folder`.
     /// For era files, checksum.txt file does not exist, so the checksum verification is
     /// skipped.
@@ -240,7 +240,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         Ok(())
     }
 
-    /// Returns ERA1/ERA file name that is ordered at `number`.
+    /// Returns EraE/ERA file name that is ordered at `number`.
     pub async fn number_to_file_name(&self, number: usize) -> eyre::Result<Option<String>> {
         let path = self.folder.to_path_buf().join("index");
         let file = File::open(&path).await?;
@@ -281,7 +281,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         }
     }
 
-    /// Returns `true` if `actual_checksum` matches expected checksum of the ERA1 file indexed by
+    /// Returns `true` if `actual_checksum` matches expected checksum of the `EraE` file indexed by
     /// `number` based on the [file list].
     ///
     /// [file list]: Self::fetch_file_list
@@ -289,7 +289,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         Ok(actual_checksum == self.expected_checksum(number).await?)
     }
 
-    /// Returns `Ok` if `actual_checksum` matches expected checksum of the ERA1 file indexed by
+    /// Returns `Ok` if `actual_checksum` matches expected checksum of the `EraE` file indexed by
     /// `number` based on the [file list].
     ///
     /// [file list]: Self::fetch_file_list
@@ -307,7 +307,7 @@ impl<Http: HttpClient + Clone> EraClient<Http> {
         }
     }
 
-    /// Returns SHA-256 checksum for ERA1 file indexed by `number` based on the [file list].
+    /// Returns SHA-256 checksum for `EraE` file indexed by `number` based on the [file list].
     ///
     /// [file list]: Self::fetch_file_list
     async fn expected_checksum(&self, number: usize) -> eyre::Result<Vec<u8>> {

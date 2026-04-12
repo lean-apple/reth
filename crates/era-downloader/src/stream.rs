@@ -34,7 +34,7 @@ impl Default for EraStreamConfig {
 }
 
 impl EraStreamConfig {
-    /// The maximum amount of downloaded ERA1 files kept in the download directory.
+    /// The maximum amount of downloaded `EraE` files kept in the download directory.
     pub const fn with_max_files(mut self, max_files: usize) -> Self {
         self.max_files = max_files;
         self
@@ -53,7 +53,7 @@ impl EraStreamConfig {
     }
 }
 
-/// An asynchronous stream of ERA1 files.
+/// An asynchronous stream of `EraE` files.
 ///
 /// # Examples
 /// ```
@@ -77,7 +77,7 @@ pub struct EraStream<Http> {
 
 impl<Http> EraStream<Http> {
     /// Constructs a new [`EraStream`] that downloads concurrently up to `max_concurrent_downloads`
-    /// ERA1 files to `client` `folder`, keeping their count up to `max_files`.
+    /// `EraE` files to `client` `folder`, keeping their count up to `max_files`.
     pub fn new(client: EraClient<Http>, config: EraStreamConfig) -> Self {
         Self {
             download_stream: DownloadStream {

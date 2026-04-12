@@ -150,11 +150,11 @@ impl StageConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct EraConfig {
-    /// Path to a local directory where ERA1 files are located.
+    /// Path to a local directory where ERAE files are located.
     ///
     /// Conflicts with `url`.
     pub path: Option<PathBuf>,
-    /// The base URL of an ERA1 file host to download from.
+    /// The base URL of an ERAE file host to download from.
     ///
     /// Conflicts with `path`.
     pub url: Option<Url>,

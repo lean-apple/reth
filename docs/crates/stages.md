@@ -2,7 +2,7 @@
 
 The `stages` lib plays a central role in syncing the node, maintaining state, updating the database and more. The stages involved in the Reth pipeline are queued up and stored within the Reth pipeline. In the default configuration, the pipeline runs the following stages in order:
 
-- EraStage (optional, for ERA1 import)
+- EraStage (optional, for EraE import)
 - HeaderStage
 - BodyStage
 - SenderRecoveryStage
@@ -30,13 +30,13 @@ To get a better idea of what is happening at each part of the pipeline, let's wa
 
 ## EraStage
 
-The `EraStage` is an optional stage that imports pre-merge historical block data from [ERA1 files](https://github.com/eth-clients/e2store-format-specs/blob/main/formats/era1.md). ERA1 is a standardized format for storing Ethereum's historical chain data, allowing nodes to quickly bootstrap by importing pre-synced data instead of downloading it from peers.
+The `EraStage` is an optional stage that imports historical block data from [EraE files](https://github.com/eth-clients/e2store-format-specs/blob/main/formats/ere.md). EraE is a standardized format for storing Ethereum's historical chain data (both pre-merge and post-merge), allowing nodes to quickly bootstrap by importing pre-synced data instead of downloading it from peers.
 
-When enabled, the `EraStage` reads block headers and bodies from ERA1 files (either from a local directory or downloaded from a remote HTTP host) and writes them directly to static files. This provides a faster alternative to downloading historical data over P2P, especially useful for syncing the pre-merge portion of the chain.
+When enabled, the `EraStage` reads block headers and bodies from EraE files (either from a local directory or downloaded from a remote HTTP host) and writes them directly to static files. This provides a faster alternative to downloading historical data over P2P.
 
-The stage processes ERA1 files sequentially, extracting headers and bodies from genesis up to the last pre-merge block. Note that receipts are not included in ERA1 files and will be generated later during the `ExecutionStage`.
+The stage processes EraE files sequentially, extracting headers and bodies. Note that receipts are not included in the import and will be generated later during the `ExecutionStage`.
 
-If no ERA1 source is configured or all ERA1 data has been imported, the stage simply passes through, allowing subsequent stages to continue with P2P-based syncing.
+If no EraE source is configured or all EraE data has been imported, the stage simply passes through, allowing subsequent stages to continue with P2P-based syncing.
 
 <br>
 

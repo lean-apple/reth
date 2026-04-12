@@ -1,4 +1,4 @@
-//! Genesis block tests for `era1` files.
+//! Genesis block tests for `erae` files.
 //!
 //! These tests verify proper decompression and decoding of genesis blocks
 //! from different networks.

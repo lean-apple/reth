@@ -63,7 +63,7 @@ jobs:
           jobs: ${{ toJSON(needs) }}
 
   era-files:
-    name: era1 file integration tests once a day
+    name: erae file integration tests once a day
     if: github.event_name == 'schedule' && github.repository == 'paradigmxyz/reth'
     runs-on: ubuntu-latest
     steps:
@@ -75,5 +75,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: run era1 files integration tests
+      - name: run erae files integration tests
         run: cargo nextest run --no-fail-fast --release --package reth-era --test it -- --ignored

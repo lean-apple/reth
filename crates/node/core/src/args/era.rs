@@ -9,10 +9,10 @@ const MAINNET_ERAE_URL: &str = "https://data.ethpandaops.io/erae/mainnet/index.h
 /// Erae url for sepolia.
 const SEPOLIA_ERAE_URL: &str = "https://data.ethpandaops.io/erae/sepolia/index.html";
 
-/// Syncs ERA1 encoded blocks from a local or remote source.
+/// Syncs `EraE` encoded blocks from a local or remote source.
 #[derive(Clone, Debug, Default, Args)]
 pub struct EraArgs {
-    /// Enable import from ERA1 files.
+    /// Enable import from `EraE` files.
     #[arg(
         id = "era.enable",
         long = "era.enable",
@@ -26,19 +26,19 @@ pub struct EraArgs {
     pub source: EraSourceArgs,
 }
 
-/// Arguments for the block history import based on ERA1 encoded files.
+/// Arguments for the block history import based on `EraE` encoded files.
 #[derive(Clone, Debug, Default, Args)]
 #[group(required = false, multiple = false)]
 pub struct EraSourceArgs {
     /// The path to a directory for import.
     ///
-    /// The ERA1 files are read from the local directory parsing headers and bodies.
+    /// The `EraE` files are read from the local directory parsing headers and bodies.
     #[arg(long = "era.path", value_name = "ERA_PATH", verbatim_doc_comment)]
     pub path: Option<Box<Path>>,
 
-    /// The URL to a remote host where the ERA1 files are hosted.
+    /// The URL to a remote host where the `EraE` files are hosted.
     ///
-    /// The ERA1 files are read from the remote host using HTTP GET requests parsing headers
+    /// The `EraE` files are read from the remote host using HTTP GET requests parsing headers
     /// and bodies.
     #[arg(long = "era.url", value_name = "ERA_URL", verbatim_doc_comment)]
     pub url: Option<Url>,

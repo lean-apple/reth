@@ -1,4 +1,4 @@
-//! An asynchronous stream interface for downloading ERA1 files.
+//! An asynchronous stream interface for downloading `EraE` files.
 //!
 //! # Examples
 //! ```
@@ -8,16 +8,16 @@
 //! use std::{path::PathBuf, str::FromStr};
 //!
 //! # async fn f() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//! // URL where the ERA1 files are hosted
+//! // URL where the EraE files are hosted
 //! let url = Url::from_str("file:///")?;
 //!
-//! // Directory where the ERA1 files will be downloaded to
+//! // Directory where the EraE files will be downloaded to
 //! let folder = PathBuf::new();
 //!
 //! let client = EraClient::new(Client::new(), url, folder);
 //!
 //! let config = EraStreamConfig::default()
-//!     // Keep up to 2 ERA1 files in the `folder`.
+//!     // Keep up to 2 EraE files in the `folder`.
 //!     // More downloads won't start until some of the files are removed.
 //!     .with_max_files(2)
 //!     // Do not download more than 2 files at the same time.

@@ -31,13 +31,13 @@ pub struct ImportEraCommand<C: ChainSpecParser> {
 pub struct ImportArgs {
     /// The path to a directory for import.
     ///
-    /// The ERA1 files are read from the local directory parsing headers and bodies.
+    /// The ERAE files are read from the local directory parsing headers and bodies.
     #[arg(long, value_name = "IMPORT_ERA_PATH", verbatim_doc_comment)]
     path: Option<PathBuf>,
 
-    /// The URL to a remote host where the ERA1 files are hosted.
+    /// The URL to a remote host where the ERAE files are hosted.
     ///
-    /// The ERA1 files are read from the remote host using HTTP GET requests parsing headers
+    /// The ERAE files are read from the remote host using HTTP GET requests parsing headers
     /// and bodies.
     #[arg(long, value_name = "IMPORT_ERA_URL", verbatim_doc_comment)]
     url: Option<Url>,
@@ -51,7 +51,8 @@ impl TryFromChain for ChainKind {
     fn try_to_url(&self) -> eyre::Result<Url> {
         Ok(match self {
             ChainKind::Named(NamedChain::Mainnet) => {
-                Url::parse("https://era.ithaca.xyz/era1/index.html").expect("URL should be valid")
+                Url::parse("https://data.ethpandaops.io/erae/mainnet/index.html")
+                    .expect("URL should be valid")
             }
             ChainKind::Named(NamedChain::Sepolia) => {
                 Url::parse("https://data.ethpandaops.io/erae/sepolia/index.html")
