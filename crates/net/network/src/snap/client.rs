@@ -3,7 +3,7 @@
 use crate::snap::peers::{SnapPeerRequest, SnapPeers};
 use reth_eth_wire_types::snap::{
     GetAccountRangeMessage, GetBlockAccessListsMessage, GetByteCodesMessage,
-    GetStorageRangesMessage, GetTrieNodesMessage, SnapProtocolMessage,
+    GetStorageRangesMessage, SnapProtocolMessage,
 };
 use reth_network_api::PeerId;
 use reth_network_p2p::{
@@ -89,19 +89,6 @@ impl SnapClientTrait for SnapClient {
         _priority: Priority,
     ) -> Self::Output {
         self.request(SnapProtocolMessage::GetByteCodes(request))
-    }
-
-    fn get_trie_nodes(&self, request: GetTrieNodesMessage) -> Self::Output {
-        self.get_trie_nodes_with_priority(request, Priority::Normal)
-    }
-
-    fn get_trie_nodes_with_priority(
-        &self,
-        _request: GetTrieNodesMessage,
-        _priority: Priority,
-    ) -> Self::Output {
-        // Trie nodes were removed in snap/2 (EIP-8189); healing uses block access lists instead.
-        SnapResponseFuture::ready_err(RequestError::UnsupportedCapability)
     }
 
     fn get_block_access_lists_with_priority(

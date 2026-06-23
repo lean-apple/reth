@@ -2,8 +2,8 @@ use crate::{download::DownloadClient, error::PeerRequestResult, priority::Priori
 use futures::Future;
 use reth_eth_wire_types::snap::{
     AccountRangeMessage, BlockAccessListsMessage, ByteCodesMessage, GetAccountRangeMessage,
-    GetBlockAccessListsMessage, GetByteCodesMessage, GetStorageRangesMessage, GetTrieNodesMessage,
-    SnapProtocolMessage, StorageRangesMessage, TrieNodesMessage,
+    GetBlockAccessListsMessage, GetByteCodesMessage, GetStorageRangesMessage, SnapProtocolMessage,
+    StorageRangesMessage,
 };
 
 /// Response types for snap sync requests
@@ -15,8 +15,6 @@ pub enum SnapResponse {
     StorageRanges(StorageRangesMessage),
     /// Response containing bytecode data
     ByteCodes(ByteCodesMessage),
-    /// Response containing trie node data
-    TrieNodes(TrieNodesMessage),
     /// Response containing block access lists.
     ///
     /// Only valid for `snap/2` (EIP-8189).
@@ -32,7 +30,6 @@ impl TryFrom<SnapProtocolMessage> for SnapResponse {
             SnapProtocolMessage::AccountRange(m) => Ok(Self::AccountRange(m)),
             SnapProtocolMessage::StorageRanges(m) => Ok(Self::StorageRanges(m)),
             SnapProtocolMessage::ByteCodes(m) => Ok(Self::ByteCodes(m)),
-            SnapProtocolMessage::TrieNodes(m) => Ok(Self::TrieNodes(m)),
             SnapProtocolMessage::BlockAccessLists(m) => Ok(Self::BlockAccessLists(m)),
             request => Err(request),
         }
@@ -80,18 +77,6 @@ pub trait SnapClient: DownloadClient {
     fn get_byte_codes_with_priority(
         &self,
         request: GetByteCodesMessage,
-        priority: Priority,
-    ) -> Self::Output;
-
-    /// Sends the trie nodes request to the p2p network and returns the trie nodes
-    /// response received from a peer.
-    fn get_trie_nodes(&self, request: GetTrieNodesMessage) -> Self::Output;
-
-    /// Sends the trie nodes request to the p2p network with priority set and returns
-    /// the trie nodes response received from a peer.
-    fn get_trie_nodes_with_priority(
-        &self,
-        request: GetTrieNodesMessage,
         priority: Priority,
     ) -> Self::Output;
 

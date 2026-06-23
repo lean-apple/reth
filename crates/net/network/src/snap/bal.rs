@@ -71,7 +71,7 @@ mod tests {
     use reth_eth_wire_types::{
         snap::{
             BlockAccessListsMessage, GetAccountRangeMessage, GetByteCodesMessage,
-            GetStorageRangesMessage, GetTrieNodesMessage,
+            GetStorageRangesMessage,
         },
         BlockAccessLists,
     };
@@ -132,18 +132,6 @@ mod tests {
         fn get_byte_codes_with_priority(
             &self,
             _request: GetByteCodesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_trie_nodes(&self, _request: GetTrieNodesMessage) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_trie_nodes_with_priority(
-            &self,
-            _request: GetTrieNodesMessage,
             _priority: Priority,
         ) -> Self::Output {
             ready(Err(RequestError::UnsupportedCapability))

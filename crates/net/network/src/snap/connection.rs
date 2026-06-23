@@ -175,9 +175,7 @@ fn serve<P: BalProvider>(provider: &P, msg: SnapProtocolMessage) -> Option<SnapP
                 codes: Vec::new(),
             }))
         }
-        // Trie nodes are not part of snap/2; response messages have no server reply.
-        SnapProtocolMessage::GetTrieNodes(_) |
-        SnapProtocolMessage::TrieNodes(_) |
+        // Response messages have no server reply.
         SnapProtocolMessage::AccountRange(_) |
         SnapProtocolMessage::StorageRanges(_) |
         SnapProtocolMessage::ByteCodes(_) |
@@ -208,7 +206,7 @@ fn serve_block_access_lists<P: BalProvider>(
 mod tests {
     use super::*;
     use alloy_primitives::B256;
-    use reth_eth_wire_types::snap::{GetTrieNodesMessage, SnapProtocolMessage};
+    use reth_eth_wire_types::snap::SnapProtocolMessage;
     use reth_storage_api::BalStoreHandle;
     use tokio::sync::mpsc;
 
@@ -222,10 +220,6 @@ mod tests {
         fn bal_store(&self) -> &BalStoreHandle {
             &self.store
         }
-    }
-
-    fn encoded(msg: SnapProtocolMessage) -> Vec<u8> {
-        msg.encode().to_vec()
     }
 
     #[test]
@@ -269,17 +263,6 @@ mod tests {
             panic!("expected BlockAccessLists");
         };
         assert_eq!(resp.block_access_lists.0.len(), 2);
-    }
-
-    #[test]
-    fn rejects_snap1_trie_node_messages() {
-        let req = SnapProtocolMessage::GetTrieNodes(GetTrieNodesMessage {
-            request_id: 7,
-            root_hash: B256::ZERO,
-            paths: Vec::new(),
-            response_bytes: 1000,
-        });
-        assert!(decode_snap2(&encoded(req)).is_none());
     }
 
     #[tokio::test]
