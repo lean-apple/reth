@@ -3,7 +3,7 @@ use futures::Future;
 use reth_eth_wire_types::snap::{
     AccountRangeMessage, BlockAccessListsMessage, ByteCodesMessage, GetAccountRangeMessage,
     GetBlockAccessListsMessage, GetByteCodesMessage, GetStorageRangesMessage, GetTrieNodesMessage,
-    StorageRangesMessage, TrieNodesMessage,
+    SnapProtocolMessage, StorageRangesMessage, TrieNodesMessage,
 };
 
 /// Response types for snap sync requests
@@ -21,6 +21,22 @@ pub enum SnapResponse {
     ///
     /// Only valid for `snap/2` (EIP-8189).
     BlockAccessLists(BlockAccessListsMessage),
+}
+
+impl TryFrom<SnapProtocolMessage> for SnapResponse {
+    /// The original message, returned unchanged when it is a request rather than a response.
+    type Error = SnapProtocolMessage;
+
+    fn try_from(msg: SnapProtocolMessage) -> Result<Self, Self::Error> {
+        match msg {
+            SnapProtocolMessage::AccountRange(m) => Ok(Self::AccountRange(m)),
+            SnapProtocolMessage::StorageRanges(m) => Ok(Self::StorageRanges(m)),
+            SnapProtocolMessage::ByteCodes(m) => Ok(Self::ByteCodes(m)),
+            SnapProtocolMessage::TrieNodes(m) => Ok(Self::TrieNodes(m)),
+            SnapProtocolMessage::BlockAccessLists(m) => Ok(Self::BlockAccessLists(m)),
+            request => Err(request),
+        }
+    }
 }
 
 /// The snap sync downloader client

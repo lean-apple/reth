@@ -320,6 +320,22 @@ impl SnapProtocolMessage {
         }
     }
 
+    /// Returns the `request_id` used to correlate this message with its request/response pair.
+    pub const fn request_id(&self) -> u64 {
+        match self {
+            Self::GetAccountRange(m) => m.request_id,
+            Self::AccountRange(m) => m.request_id,
+            Self::GetStorageRanges(m) => m.request_id,
+            Self::StorageRanges(m) => m.request_id,
+            Self::GetByteCodes(m) => m.request_id,
+            Self::ByteCodes(m) => m.request_id,
+            Self::GetTrieNodes(m) => m.request_id,
+            Self::TrieNodes(m) => m.request_id,
+            Self::GetBlockAccessLists(m) => m.request_id,
+            Self::BlockAccessLists(m) => m.request_id,
+        }
+    }
+
     /// Encode the message to bytes
     pub fn encode(&self) -> Bytes {
         let mut buf = Vec::new();
