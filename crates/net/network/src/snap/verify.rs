@@ -1,55 +1,70 @@
 //! Verification of `snap/2` block access list responses.
 //!
-//! BALs are verified against the `block_access_list_hash` committed in the block header and applied
-//! in strict block order; a required-but-missing BAL is a hard failure (EIP-8189).
+//! Received BALs are decoded and checked against the `block_access_list_hash` committed in the
+//! block header using the canonical EIP-7928 hash of the decoded list, then applied in strict block
+//! order. A required-but-missing BAL is a hard failure.
 
-use alloy_primitives::{keccak256, Bytes, B256};
+use alloy_eip7928::bal::DecodedBal;
+use alloy_primitives::{Bytes, B256};
 
 /// Error verifying a `snap/2` block access list.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum BalVerifyError {
     /// A BAL required to make progress was not provided by the peer.
     #[error("missing block access list for block {0}")]
     Missing(B256),
-    /// The BAL payload does not hash to the header's `block_access_list_hash`.
+    /// The payload could not be decoded as a block access list.
+    #[error("malformed block access list for block {block}: {source}")]
+    Malformed {
+        /// Block the payload belongs to.
+        block: B256,
+        /// Underlying RLP decode error.
+        source: alloy_rlp::Error,
+    },
+    /// The decoded BAL does not hash to the header's `block_access_list_hash`.
     #[error("block access list hash mismatch for block {block}: got {got}, expected {expected}")]
     HashMismatch {
         /// Block the BAL belongs to.
         block: B256,
-        /// Hash computed from the received payload.
+        /// Canonical hash computed from the decoded payload.
         got: B256,
         /// Hash committed in the block header.
         expected: B256,
     },
 }
 
-/// Verifies a single BAL payload against the `block_access_list_hash` from its block header.
+/// Decodes and verifies a single BAL payload against its header's `block_access_list_hash`.
+///
+/// The payload is decoded with [`DecodedBal::from_rlp_bytes`] and compared using the canonical
+/// EIP-7928 hash of the decoded list (not `keccak256` of the raw bytes), matching execution and
+/// payload validation. The decoded BAL is returned so callers persist the canonical form.
 pub fn verify_block_access_list(
     block: B256,
-    bal: &Bytes,
+    raw: Bytes,
     expected_hash: B256,
-) -> Result<(), BalVerifyError> {
-    let got = keccak256(bal);
+) -> Result<DecodedBal, BalVerifyError> {
+    let decoded = DecodedBal::from_rlp_bytes(raw)
+        .map_err(|source| BalVerifyError::Malformed { block, source })?;
+    let got = decoded.as_bal().compute_hash();
     if got == expected_hash {
-        Ok(())
+        Ok(decoded)
     } else {
         Err(BalVerifyError::HashMismatch { block, got, expected: expected_hash })
     }
 }
 
-/// Verifies BALs for a contiguous span of blocks in strict order.
+/// Decodes and verifies BALs for a contiguous span of blocks in strict order.
 ///
 /// Each item is `(block_hash, expected_bal_hash, received_bal)`. Verification stops at the first
 /// failure so BALs are only ever applied in order and after their hash is checked.
-pub fn verify_in_order<I>(items: I) -> Result<Vec<(B256, Bytes)>, BalVerifyError>
+pub fn verify_in_order<I>(items: I) -> Result<Vec<(B256, DecodedBal)>, BalVerifyError>
 where
     I: IntoIterator<Item = (B256, B256, Option<Bytes>)>,
 {
     let mut verified = Vec::new();
     for (block, expected_hash, received) in items {
-        let bal = received.ok_or(BalVerifyError::Missing(block))?;
-        verify_block_access_list(block, &bal, expected_hash)?;
-        verified.push((block, bal));
+        let raw = received.ok_or(BalVerifyError::Missing(block))?;
+        verified.push((block, verify_block_access_list(block, raw, expected_hash)?));
     }
     Ok(verified)
 }
@@ -57,36 +72,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_eip7928::bal::Bal;
 
-    #[test]
-    fn accepts_matching_hash() {
-        let bal = Bytes::from_static(b"block-access-list");
-        let hash = keccak256(&bal);
-        assert!(verify_block_access_list(B256::with_last_byte(1), &bal, hash).is_ok());
+    /// RLP of an empty block access list (an empty list).
+    fn empty_bal_raw() -> Bytes {
+        Bytes::from_static(&[alloy_rlp::EMPTY_LIST_CODE])
+    }
+
+    fn empty_bal_hash() -> B256 {
+        Bal::default().compute_hash()
     }
 
     #[test]
-    fn rejects_mismatched_hash() {
-        let bal = Bytes::from_static(b"block-access-list");
-        let err = verify_block_access_list(B256::with_last_byte(1), &bal, B256::ZERO).unwrap_err();
+    fn accepts_canonical_bal() {
+        let block = B256::with_last_byte(1);
+        let decoded = verify_block_access_list(block, empty_bal_raw(), empty_bal_hash()).unwrap();
+        assert_eq!(decoded.as_bal().compute_hash(), empty_bal_hash());
+    }
+
+    #[test]
+    fn rejects_hash_mismatch() {
+        let err = verify_block_access_list(B256::with_last_byte(1), empty_bal_raw(), B256::ZERO)
+            .unwrap_err();
         assert!(matches!(err, BalVerifyError::HashMismatch { .. }));
     }
 
     #[test]
-    fn verifies_span_in_order_and_fails_on_missing() {
-        let bal0 = Bytes::from_static(b"bal-0");
-        let bal1 = Bytes::from_static(b"bal-1");
-        let (b0, b1) = (B256::with_last_byte(1), B256::with_last_byte(2));
+    fn rejects_malformed_payload() {
+        // A list header announcing one byte of payload that is not present.
+        let err = verify_block_access_list(
+            B256::with_last_byte(1),
+            Bytes::from_static(&[0xc1]),
+            empty_bal_hash(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, BalVerifyError::Malformed { .. }));
+    }
 
-        let ok = verify_in_order([
-            (b0, keccak256(&bal0), Some(bal0.clone())),
-            (b1, keccak256(&bal1), Some(bal1.clone())),
+    #[test]
+    fn verifies_span_in_order_and_fails_on_missing() {
+        let (b0, b1) = (B256::with_last_byte(1), B256::with_last_byte(2));
+        let verified = verify_in_order([
+            (b0, empty_bal_hash(), Some(empty_bal_raw())),
+            (b1, empty_bal_hash(), Some(empty_bal_raw())),
         ])
         .unwrap();
-        assert_eq!(ok, vec![(b0, bal0), (b1, bal1.clone())]);
+        assert_eq!(verified.len(), 2);
+        assert_eq!(verified[0].0, b0);
+        assert_eq!(verified[1].0, b1);
 
         // a required BAL the peer omitted is a hard failure
-        let err = verify_in_order([(b0, keccak256(&bal1), None)]).unwrap_err();
-        assert_eq!(err, BalVerifyError::Missing(b0));
+        let err = verify_in_order([(b0, empty_bal_hash(), None)]).unwrap_err();
+        assert!(matches!(err, BalVerifyError::Missing(block) if block == b0));
     }
 }

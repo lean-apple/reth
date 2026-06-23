@@ -1,7 +1,8 @@
 //! Client-side block access list fetch and verification for snap/2 catch-up.
 
 use crate::snap::verify::{verify_in_order, BalVerifyError};
-use alloy_primitives::{Bytes, B256};
+use alloy_eip7928::bal::DecodedBal;
+use alloy_primitives::B256;
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
 use reth_network_p2p::{
     error::RequestError,
@@ -20,7 +21,7 @@ pub struct BalRequest {
 /// Error fetching or verifying BALs from a peer.
 #[derive(Debug, thiserror::Error)]
 pub enum BalFetchError {
-    /// A returned BAL failed verification against its header.
+    /// A returned BAL failed decoding or verification against its header.
     #[error(transparent)]
     Verify(#[from] BalVerifyError),
     /// The peer request failed.
@@ -33,15 +34,15 @@ pub enum BalFetchError {
 
 /// Fetches and verifies BALs for the given blocks, in order, from a snap/2 peer.
 ///
-/// Returns the verified `(block_hash, bal)` pairs for the prefix the peer returned. Responses may
-/// be tail-truncated, so fewer pairs than requested can come back and the caller should request the
+/// Returns the decoded `(block_hash, bal)` pairs for the prefix the peer returned. Responses may be
+/// tail-truncated, so fewer pairs than requested can come back and the caller should request the
 /// remainder; a returned-but-empty entry is a genuine missing BAL and fails verification.
 pub async fn fetch_and_verify_bals<C: SnapClient>(
     client: &C,
     request_id: u64,
     blocks: &[BalRequest],
     response_bytes: u64,
-) -> Result<Vec<(B256, Bytes)>, BalFetchError> {
+) -> Result<Vec<(B256, DecodedBal)>, BalFetchError> {
     let request = GetBlockAccessListsMessage {
         request_id,
         block_hashes: blocks.iter().map(|b| b.block_hash).collect(),
@@ -64,7 +65,8 @@ pub async fn fetch_and_verify_bals<C: SnapClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::keccak256;
+    use alloy_eip7928::bal::Bal;
+    use alloy_primitives::Bytes;
     use core::future::{ready, Ready};
     use reth_eth_wire_types::{
         snap::{
@@ -75,6 +77,14 @@ mod tests {
     };
     use reth_network_p2p::{download::DownloadClient, priority::Priority};
     use reth_network_peers::{PeerId, WithPeerId};
+
+    /// RLP of an empty (valid) block access list, and its canonical hash.
+    fn empty_bal_raw() -> Bytes {
+        Bytes::from_static(&[alloy_rlp::EMPTY_LIST_CODE])
+    }
+    fn empty_bal_hash() -> B256 {
+        Bal::default().compute_hash()
+    }
 
     /// Client that answers every `GetBlockAccessLists` with a fixed response.
     #[derive(Debug)]
@@ -163,25 +173,26 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_and_verifies_matching_bals() {
-        let bal = Bytes::from_static(b"bal-0");
         let block = B256::with_last_byte(1);
-        let client = client_returning(vec![Some(bal.clone())]);
+        let client = client_returning(vec![Some(empty_bal_raw())]);
 
         let verified = fetch_and_verify_bals(
             &client,
             1,
-            &[BalRequest { block_hash: block, expected_hash: keccak256(&bal) }],
+            &[BalRequest { block_hash: block, expected_hash: empty_bal_hash() }],
             u64::MAX,
         )
         .await
         .unwrap();
 
-        assert_eq!(verified, vec![(block, bal)]);
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].0, block);
+        assert_eq!(verified[0].1.as_bal().compute_hash(), empty_bal_hash());
     }
 
     #[tokio::test]
     async fn rejects_bal_with_wrong_hash() {
-        let client = client_returning(vec![Some(Bytes::from_static(b"bal-0"))]);
+        let client = client_returning(vec![Some(empty_bal_raw())]);
         let err = fetch_and_verify_bals(
             &client,
             1,

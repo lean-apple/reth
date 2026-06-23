@@ -37,6 +37,7 @@ reth-network-types = { workspace = true, features = ["serde"] }
 
 # ethereum
 alloy-consensus.workspace = true
+alloy-eip7928.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
