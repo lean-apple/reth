@@ -351,6 +351,19 @@ impl SnapProtocolMessage {
 
         Err(alloy_rlp::Error::Custom("Unknown message ID"))
     }
+
+    /// Decodes a single inbound snap message from its framed bytes (`[id, body..]`), validating the
+    /// message id against `version`.
+    ///
+    /// Returns `None` for empty/malformed payloads and for ids not valid in `version` (e.g. the
+    /// removed trie-node messages `0x06`/`0x07` under snap/2).
+    pub fn decode_versioned(version: SnapVersion, bytes: &[u8]) -> Option<Self> {
+        let id = *bytes.first()?;
+        if !version.supports_message_id(id) {
+            return None;
+        }
+        Self::decode(id, &mut &bytes[1..]).ok()
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +387,31 @@ mod tests {
 
         // Verify the match
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_versioned_round_trips_framed_message() {
+        let original = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+            request_id: 7,
+            block_hashes: vec![b256_from_u64(1)],
+            response_bytes: 1024,
+        });
+        let framed = original.encode();
+        let decoded = SnapProtocolMessage::decode_versioned(SnapVersion::V2, &framed).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_versioned_rejects_trie_node_ids_in_v2() {
+        // snap/2 (EIP-8189) removes trie nodes (`0x06`/`0x07`); decoding must reject them.
+        for id in [0x06u8, 0x07] {
+            assert!(SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[id]).is_none());
+        }
+    }
+
+    #[test]
+    fn decode_versioned_rejects_empty() {
+        assert!(SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[]).is_none());
     }
 
     #[test]

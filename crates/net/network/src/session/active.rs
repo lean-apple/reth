@@ -29,9 +29,13 @@ use metrics::{Counter, Gauge};
 use reth_eth_wire::{
     errors::{EthHandshakeError, EthStreamError},
     message::{EthBroadcastMessage, MessageError},
-    Capabilities, DisconnectP2P, DisconnectReason, EthMessage, NetworkPrimitives, NewBlockPayload,
+    Capabilities, DisconnectP2P, DisconnectReason, EthMessage, EthSnapMessage, NetworkPrimitives,
+    NewBlockPayload,
 };
-use reth_eth_wire_types::{message::RequestPair, NewPooledTransactionHashes, RawCapabilityMessage};
+use reth_eth_wire_types::{
+    message::RequestPair, snap::SnapProtocolMessage, NewPooledTransactionHashes,
+    RawCapabilityMessage,
+};
 use reth_metrics::common::mpsc::MeteredPollSender;
 use reth_network_api::PeerRequest;
 use reth_network_p2p::error::RequestError;
@@ -377,6 +381,22 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             }
             EthMessage::Other(bytes) => self.try_emit_broadcast(PeerMessage::Other(bytes)).into(),
         }
+    }
+
+    /// Handle an inbound `snap/2` message read from the dedicated [`EthSnapStream`].
+    ///
+    /// The message has already been decoded and validated against `snap/2` by the stream.
+    // TODO(snap/2): serve inbound requests from the BAL/state store and correlate inbound responses
+    // to outstanding `SnapClient` requests once the provider and request channel are threaded into
+    // the session.
+    fn on_incoming_snap_message(&mut self, msg: SnapProtocolMessage) -> OnIncomingMessageOutcome<N> {
+        trace!(
+            target: "net::session",
+            msg_id=?msg.message_id(),
+            remote_peer_id=?self.remote_peer_id,
+            "received snap message",
+        );
+        OnIncomingMessageOutcome::Ok
     }
 
     /// Handle an internal peer request that will be sent to the remote.
@@ -806,9 +826,15 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                     Poll::Ready(Some(res)) => {
                         match res {
                             Ok(msg) => {
-                                trace!(target: "net::session", msg_id=?msg.message_id(), remote_peer_id=?this.remote_peer_id, "received eth message");
                                 // decode and handle message
-                                match this.on_incoming_message(msg) {
+                                let outcome = match msg {
+                                    EthSnapMessage::Eth(msg) => {
+                                        trace!(target: "net::session", msg_id=?msg.message_id(), remote_peer_id=?this.remote_peer_id, "received eth message");
+                                        this.on_incoming_message(msg)
+                                    }
+                                    EthSnapMessage::Snap(msg) => this.on_incoming_snap_message(msg),
+                                };
+                                match outcome {
                                     OnIncomingMessageOutcome::Ok => {
                                         // handled successfully
                                         progress = true;
