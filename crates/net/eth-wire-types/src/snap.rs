@@ -228,6 +228,21 @@ pub enum SnapProtocolMessage {
     BlockAccessLists(BlockAccessListsMessage),
 }
 
+/// Error decoding an inbound `snap` protocol message from its framed bytes.
+#[derive(thiserror::Error, Debug)]
+pub enum SnapProtocolError {
+    /// The payload was empty and carried no message id.
+    #[error("empty snap message")]
+    Empty,
+    /// The message id is not valid for the negotiated snap version (e.g. the removed trie-node
+    /// messages `0x06`/`0x07` under snap/2).
+    #[error("message id {0:#x} is invalid for snap/{1:?}")]
+    UnsupportedMessageId(u8, SnapVersion),
+    /// Decoding the RLP message body failed.
+    #[error("RLP error: {0}")]
+    Rlp(#[from] alloy_rlp::Error),
+}
+
 impl SnapProtocolMessage {
     /// Returns the protocol message ID for this message type.
     ///
@@ -355,14 +370,15 @@ impl SnapProtocolMessage {
     /// Decodes a single inbound snap message from its framed bytes (`[id, body..]`), validating the
     /// message id against `version`.
     ///
-    /// Returns `None` for empty/malformed payloads and for ids not valid in `version` (e.g. the
-    /// removed trie-node messages `0x06`/`0x07` under snap/2).
-    pub fn decode_versioned(version: SnapVersion, bytes: &[u8]) -> Option<Self> {
-        let id = *bytes.first()?;
+    /// Distinguishes the failure modes so callers can react precisely: an empty payload, an id not
+    /// valid in `version` (e.g. the removed trie-node messages `0x06`/`0x07` under snap/2), and a
+    /// malformed body are each reported as a distinct [`SnapProtocolError`].
+    pub fn decode_versioned(version: SnapVersion, bytes: &[u8]) -> Result<Self, SnapProtocolError> {
+        let (&id, body) = bytes.split_first().ok_or(SnapProtocolError::Empty)?;
         if !version.supports_message_id(id) {
-            return None;
+            return Err(SnapProtocolError::UnsupportedMessageId(id, version));
         }
-        Self::decode(id, &mut &bytes[1..]).ok()
+        Self::decode(id, &mut &body[..]).map_err(SnapProtocolError::Rlp)
     }
 }
 
@@ -403,15 +419,32 @@ mod tests {
 
     #[test]
     fn decode_versioned_rejects_trie_node_ids_in_v2() {
-        // snap/2 (EIP-8189) removes trie nodes (`0x06`/`0x07`); decoding must reject them.
+        // snap/2 (EIP-8189) removes trie nodes (`0x06`/`0x07`); decoding must reject them as an
+        // unsupported id rather than a malformed body.
         for id in [0x06u8, 0x07] {
-            assert!(SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[id]).is_none());
+            assert!(matches!(
+                SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[id]),
+                Err(SnapProtocolError::UnsupportedMessageId(got, SnapVersion::V2)) if got == id
+            ));
         }
     }
 
     #[test]
     fn decode_versioned_rejects_empty() {
-        assert!(SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[]).is_none());
+        assert!(matches!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[]),
+            Err(SnapProtocolError::Empty)
+        ));
+    }
+
+    #[test]
+    fn decode_versioned_reports_malformed_body() {
+        // A valid id (GetBlockAccessLists, 0x08) with a non-decodable body is an RLP error, not an
+        // unsupported id.
+        assert!(matches!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[0x08, 0xff]),
+            Err(SnapProtocolError::Rlp(_))
+        ));
     }
 
     #[test]

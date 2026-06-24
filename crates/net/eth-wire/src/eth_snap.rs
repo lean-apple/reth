@@ -192,6 +192,43 @@ pub enum EthSnapMessage<N: NetworkPrimitives = EthNetworkPrimitives> {
     Snap(SnapProtocolMessage),
 }
 
+impl<St, N> EthSnapStream<St, N>
+where
+    St: Stream<Item = io::Result<BytesMut>> + Sink<Bytes, Error = io::Error> + Unpin,
+    N: NetworkPrimitives,
+{
+    /// Moves queued outbound bytes from the proxy channels onto the wire, `eth` before `snap`.
+    ///
+    /// Returns `Ready(Ok(()))` once both channels are drained (the wire holds every queued frame),
+    /// `Pending` while the wire is not ready to accept more, or an error from the wire. This is the
+    /// single place that bridges the proxy channels to `conn`, so [`Sink::poll_flush`] can rely on
+    /// it instead of reporting flushed while bytes still sit in the channels.
+    fn poll_service_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), EthStreamError>> {
+        loop {
+            match self.conn.poll_ready_unpin(cx) {
+                Poll::Ready(Ok(())) => {
+                    let next = match self.from_eth.poll_next_unpin(cx) {
+                        Poll::Ready(Some(bytes)) => Some(bytes),
+                        _ => match self.from_snap.poll_next_unpin(cx) {
+                            Poll::Ready(Some(mut bytes)) => {
+                                mask_snap(&mut bytes, self.snap_offset)?;
+                                Some(bytes.freeze())
+                            }
+                            _ => None,
+                        },
+                    };
+                    match next {
+                        Some(bytes) => self.conn.start_send_unpin(bytes)?,
+                        None => return Poll::Ready(Ok(())),
+                    }
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 impl<St, N> Stream for EthSnapStream<St, N>
 where
     St: Stream<Item = io::Result<BytesMut>> + Sink<Bytes, Error = io::Error> + Unpin,
@@ -211,47 +248,19 @@ where
                 _ => {}
             }
 
-            // Return the next decoded inbound `snap/2` message. Ids invalid in snap/2 (the removed
-            // trie-node messages `0x06`/`0x07`) or malformed payloads are a protocol violation by
-            // the peer and surface as a protocol-breach error rather than being silently dropped.
+            // Return the next decoded inbound `snap/2` message. An id invalid in snap/2 (the removed
+            // trie-node messages `0x06`/`0x07`), an unknown id, or a malformed payload is a protocol
+            // violation by the peer and surfaces as a protocol-breach error, not silently dropped.
             if let Poll::Ready(Some(bytes)) = this.snap_inbound.poll_next_unpin(cx) {
                 return match SnapProtocolMessage::decode_versioned(SnapVersion::V2, &bytes) {
-                    Some(msg) => Poll::Ready(Some(Ok(EthSnapMessage::Snap(msg)))),
-                    None => {
-                        let id = bytes.first().copied().unwrap_or_default();
-                        Poll::Ready(Some(Err(P2PStreamError::UnknownReservedMessageId(id).into())))
-                    }
+                    Ok(msg) => Poll::Ready(Some(Ok(EthSnapMessage::Snap(msg)))),
+                    Err(err) => Poll::Ready(Some(Err(err.into()))),
                 }
             }
 
-            // Flush queued outbound (`eth` first, then `snap`) onto the wire.
-            loop {
-                match this.conn.poll_ready_unpin(cx) {
-                    Poll::Ready(Ok(())) => {
-                        let next = match this.from_eth.poll_next_unpin(cx) {
-                            Poll::Ready(Some(bytes)) => Some(bytes),
-                            _ => match this.from_snap.poll_next_unpin(cx) {
-                                Poll::Ready(Some(mut bytes)) => {
-                                    match mask_snap(&mut bytes, this.snap_offset) {
-                                        Ok(()) => Some(bytes.freeze()),
-                                        Err(err) => return Poll::Ready(Some(Err(err.into()))),
-                                    }
-                                }
-                                _ => None,
-                            },
-                        };
-                        match next {
-                            Some(bytes) => {
-                                if let Err(err) = this.conn.start_send_unpin(bytes) {
-                                    return Poll::Ready(Some(Err(err.into())))
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
-                    Poll::Pending => break,
-                }
+            // Move queued outbound (`eth` then `snap`) from the proxy channels onto the wire.
+            if let Poll::Ready(Err(err)) = this.poll_service_outbound(cx) {
+                return Poll::Ready(Some(Err(err)))
             }
 
             // Pull inbound messages off the wire and route them by capability.
@@ -274,7 +283,10 @@ where
                 }
             }
 
-            let _ = this.conn.poll_flush_unpin(cx);
+            // Surface flush errors instead of dropping them.
+            if let Poll::Ready(Err(err)) = this.conn.poll_flush_unpin(cx) {
+                return Poll::Ready(Some(Err(err.into())))
+            }
 
             // Loop to surface anything we just routed to the primary/snap; otherwise yield.
             if delegated {
@@ -312,7 +324,13 @@ where
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.get_mut().conn.poll_flush_unpin(cx).map_err(Into::into)
+        let this = self.get_mut();
+        // Push the eth stream's encoded bytes into the proxy channel...
+        ready!(this.eth.poll_flush_unpin(cx))?;
+        // ...move all queued eth/snap bytes from the proxy channels onto the wire...
+        ready!(this.poll_service_outbound(cx))?;
+        // ...then flush the wire itself.
+        this.conn.poll_flush_unpin(cx).map_err(Into::into)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

@@ -155,7 +155,8 @@ EthSnapMessage::Snap(msg) -> on_incoming_snap_message(msg)   // snap serve + res
 ```
 
 Outbound `eth` messages use the existing `EthMessage` sink path; outbound `snap` messages use
-`EthRlpxConnection::start_send_snap` (a no-op on non-snap connections).
+`EthRlpxConnection::start_send_snap`, which errors on connections that did not negotiate `snap/2`
+(so a caller never believes a request was sent when it was discarded).
 
 ---
 
