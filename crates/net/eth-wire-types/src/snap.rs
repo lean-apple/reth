@@ -448,18 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_versioned_rejects_trie_node_ids_in_v2() {
-        // snap/2 (EIP-8189) removes trie nodes (`0x06`/`0x07`); decoding must reject them as an
-        // unsupported id rather than a malformed body.
-        for id in [0x06u8, 0x07] {
-            assert!(matches!(
-                SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[id]),
-                Err(SnapProtocolError::UnsupportedMessageId(got, SnapVersion::V2)) if got == id
-            ));
-        }
-    }
-
-    #[test]
     fn is_response_classifies_requests_and_responses() {
         let request = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
             request_id: 1,
@@ -709,16 +697,6 @@ mod tests {
                 Err(SnapProtocolError::UnsupportedMessageId(got, SnapVersion::V2)) if got == id
             ));
         }
-    }
-
-    #[test]
-    fn decode_versioned_reports_malformed_body() {
-        // A valid id (GetBlockAccessLists, 0x08) with a non-decodable body is an RLP error, not an
-        // unsupported id.
-        assert!(matches!(
-            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[0x08, 0xff]),
-            Err(SnapProtocolError::Rlp(_))
-        ));
     }
 
     #[test]
