@@ -98,3 +98,47 @@ pub trait SnapClient: DownloadClient {
         priority: Priority,
     ) -> Self::Output;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_eth_wire_types::BlockAccessLists;
+    use test_case::test_case;
+
+    #[test_case(
+        SnapProtocolMessage::GetAccountRange(GetAccountRangeMessage {
+            request_id: 1, root_hash: Default::default(), starting_hash: Default::default(),
+            limit_hash: Default::default(), response_bytes: 0,
+        }), false ; "account range request is not a response"
+    )]
+    #[test_case(
+        SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+            request_id: 1, block_hashes: vec![], response_bytes: 0,
+        }), false ; "block access lists request is not a response"
+    )]
+    #[test_case(
+        SnapProtocolMessage::AccountRange(AccountRangeMessage {
+            request_id: 1, accounts: vec![], proof: vec![],
+        }), true ; "account range response converts"
+    )]
+    #[test_case(
+        SnapProtocolMessage::ByteCodes(ByteCodesMessage { request_id: 1, codes: vec![] }),
+        true ; "byte codes response converts"
+    )]
+    #[test_case(
+        SnapProtocolMessage::BlockAccessLists(BlockAccessListsMessage {
+            request_id: 1, block_access_lists: BlockAccessLists(vec![]),
+        }), true ; "block access lists response converts"
+    )]
+    fn try_from_snap_message(msg: SnapProtocolMessage, is_response: bool) {
+        let original = msg.clone();
+        match SnapResponse::try_from(msg) {
+            Ok(_) => assert!(is_response),
+            // requests are returned unchanged
+            Err(returned) => {
+                assert!(!is_response);
+                assert_eq!(returned, original);
+            }
+        }
+    }
+}
