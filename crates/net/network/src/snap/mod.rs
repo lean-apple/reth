@@ -12,5 +12,8 @@ pub mod bal;
 mod client;
 pub use client::{SnapClient, SnapPeerRequest, SnapResponseFuture};
 
+mod server;
+pub(crate) use server::serve_snap_request;
+
 pub mod sync;
 pub mod verify;

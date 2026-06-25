@@ -63,6 +63,7 @@ pub use handle::{
 };
 pub use reth_network_api::{Direction, PeerInfo};
 use reth_network_p2p::error::RequestError;
+use reth_storage_api::BalStoreHandle;
 
 /// Internal identifier for active sessions.
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq, Hash)]
@@ -119,6 +120,8 @@ pub struct SessionManager<N: NetworkPrimitives> {
     active_session_rx: ReceiverStream<ActiveSessionMessage<N>>,
     /// Additional `RLPx` sub-protocols to be used by the session manager.
     extra_protocols: RlpxSubProtocols,
+    /// The block-access-list store cloned into each session to serve inbound `snap/2` requests.
+    bal_store: BalStoreHandle,
     /// Tracks the ongoing graceful disconnections attempts for incoming connections.
     disconnections_counter: DisconnectionsCounter,
     /// Metrics for the session manager.
@@ -155,6 +158,7 @@ impl<N: NetworkPrimitives> SessionManager<N> {
         hello_message: HelloMessageWithProtocols,
         fork_filter: ForkFilter,
         extra_protocols: RlpxSubProtocols,
+        bal_store: BalStoreHandle,
         handshake: Arc<dyn EthRlpxHandshake>,
         eth_max_message_size: usize,
         reject_block_announcements: bool,
@@ -190,6 +194,7 @@ impl<N: NetworkPrimitives> SessionManager<N> {
             active_session_tx: MeteredPollSender::new(active_session_tx, "network_active_session"),
             active_session_rx: ReceiverStream::new(active_session_rx),
             extra_protocols,
+            bal_store,
             disconnections_counter: Default::default(),
             metrics: Default::default(),
             handshake,
@@ -629,6 +634,7 @@ impl<N: NetworkPrimitives> SessionManager<N> {
                     internal_request_rx: ReceiverStream::new(messages_rx).fuse(),
                     inflight_requests: Default::default(),
                     inflight_snap_requests: Default::default(),
+                    bal_store: self.bal_store.clone(),
                     conn,
                     queued_outgoing: QueuedOutgoingMessages::new(
                         self.metrics.queued_outgoing_messages.clone(),

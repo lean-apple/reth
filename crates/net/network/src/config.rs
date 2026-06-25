@@ -21,7 +21,7 @@ use reth_ethereum_forks::{ForkFilter, Head};
 use reth_network_peers::{mainnet_nodes, pk2id, sepolia_nodes, PeerId, TrustedPeer};
 use reth_network_types::{PeersConfig, SessionsConfig};
 use reth_storage_api::{
-    noop::NoopProvider, BalProvider, BlockNumReader, BlockReader, HeaderProvider,
+    noop::NoopProvider, BalProvider, BalStoreHandle, BlockNumReader, BlockReader, HeaderProvider,
 };
 use reth_tasks::Runtime;
 use secp256k1::SECP256K1;
@@ -86,6 +86,9 @@ pub struct NetworkConfig<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     pub hello_message: HelloMessageWithProtocols,
     /// Additional protocols to announce and handle in `RLPx`
     pub extra_protocols: RlpxSubProtocols,
+    /// The block-access-list store used to serve inbound `snap/2` requests. Defaults to a no-op
+    /// store; set [`NetworkConfigBuilder::with_bal_store`] to serve real BALs.
+    pub bal_store: BalStoreHandle,
     /// Whether to disable transaction gossip
     pub tx_gossip_disabled: bool,
     /// How to instantiate transactions manager.
@@ -209,6 +212,8 @@ pub struct NetworkConfigBuilder<N: NetworkPrimitives = EthNetworkPrimitives> {
     hello_message: Option<HelloMessageWithProtocols>,
     /// The executor to use for spawning tasks.
     extra_protocols: RlpxSubProtocols,
+    /// The block-access-list store used to serve inbound `snap/2` requests.
+    bal_store: BalStoreHandle,
     /// Head used to start set for the fork filter and status.
     head: Option<Head>,
     /// Whether tx gossip is disabled
@@ -264,6 +269,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             executor,
             hello_message: None,
             extra_protocols: Default::default(),
+            bal_store: BalStoreHandle::default(),
             head: None,
             tx_gossip_disabled: false,
             block_import: None,
@@ -558,6 +564,14 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
         self
     }
 
+    /// Sets the block-access-list store used to serve inbound `snap/2` requests.
+    ///
+    /// Defaults to a no-op store, which answers every request with empty entries.
+    pub fn with_bal_store(mut self, bal_store: BalStoreHandle) -> Self {
+        self.bal_store = bal_store;
+        self
+    }
+
     /// Sets whether tx gossip is disabled.
     pub const fn disable_tx_gossip(mut self, disable_tx_gossip: bool) -> Self {
         self.tx_gossip_disabled = disable_tx_gossip;
@@ -649,6 +663,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             executor,
             hello_message,
             extra_protocols,
+            bal_store,
             head,
             tx_gossip_disabled,
             block_import,
@@ -733,6 +748,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             status,
             hello_message,
             extra_protocols,
+            bal_store,
             fork_filter,
             tx_gossip_disabled,
             transactions_manager_config,

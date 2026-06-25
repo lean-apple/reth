@@ -21,7 +21,7 @@ use crate::{
         handle::{ActiveSessionMessage, SessionCommand},
         BlockRangeInfo, EthVersion, SessionId,
     },
-    snap::SnapPeerRequest,
+    snap::{serve_snap_request, SnapPeerRequest},
 };
 use alloy_eips::merge::EPOCH_SLOTS;
 use alloy_primitives::Sealable;
@@ -46,6 +46,7 @@ use reth_network_p2p::{
 use reth_network_peers::{PeerId, WithPeerId};
 use reth_network_types::session::config::INITIAL_REQUEST_TIMEOUT;
 use reth_primitives_traits::Block;
+use reth_storage_api::BalStoreHandle;
 use rustc_hash::FxHashMap;
 use tokio::{
     sync::{mpsc, mpsc::error::TrySendError, oneshot},
@@ -174,6 +175,8 @@ pub(crate) struct ActiveSession<N: NetworkPrimitives> {
     /// Outstanding `snap/2` requests sent to the remote peer, keyed by a session-unique
     /// `request_id`, awaiting the correlated response on the dedicated `eth`+`snap` stream.
     pub(crate) inflight_snap_requests: FxHashMap<u64, InflightSnapRequest>,
+    /// Block-access-list store used to serve inbound `snap/2` requests.
+    pub(crate) bal_store: BalStoreHandle,
     /// All requests that were sent by the remote peer and we're waiting on an internal response
     pub(crate) received_requests_from_remote: Vec<ReceivedRequest<N>>,
     /// Buffered messages that should be handled and sent to the peer.
@@ -428,8 +431,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
     /// Handle an inbound `snap/2` message read from the dedicated [`EthSnapStream`].
     ///
     /// Responses are correlated back to the outstanding [`SnapClient`](crate::snap::SnapClient)
-    /// request by `request_id`. Inbound requests are not served yet — the server side is wired
-    /// separately — so they are ignored.
+    /// request by `request_id`. Inbound requests are served from local stores (currently only
+    /// `GetBlockAccessLists`), echoing the peer's `request_id`; request types that are not served
+    /// yet are ignored.
     fn on_incoming_snap_message(
         &mut self,
         msg: SnapProtocolMessage,
@@ -444,10 +448,13 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     trace!(target: "net::session", ?request_id, remote_peer_id=?self.remote_peer_id, "received snap response to unknown request");
                 }
             }
-            // TODO(snap/2 server): serve inbound requests from the BAL/state provider. Until the
-            // server side is wired, this node is a client only and ignores inbound requests.
-            Err(_request) => {
-                trace!(target: "net::session", ?request_id, remote_peer_id=?self.remote_peer_id, "ignoring inbound snap request; serving not yet supported");
+            Err(request) => {
+                if let Some(response) = serve_snap_request(&self.bal_store, request) {
+                    trace!(target: "net::session", ?request_id, remote_peer_id=?self.remote_peer_id, "serving inbound snap request");
+                    self.queued_outgoing.push_back(OutgoingMessage::Snap(response));
+                } else {
+                    trace!(target: "net::session", ?request_id, remote_peer_id=?self.remote_peer_id, "ignoring unsupported inbound snap request");
+                }
             }
         }
         OnIncomingMessageOutcome::Ok
@@ -1372,6 +1379,7 @@ mod tests {
                         internal_request_rx: ReceiverStream::new(messages_rx).fuse(),
                         inflight_requests: Default::default(),
                         inflight_snap_requests: Default::default(),
+                        bal_store: BalStoreHandle::default(),
                         conn,
                         queued_outgoing: QueuedOutgoingMessages::new(
                             Gauge::noop(),
@@ -1660,6 +1668,37 @@ mod tests {
         assert!(session.inflight_snap_requests.is_empty());
 
         assert_eq!(rx.await.unwrap().unwrap_err(), RequestError::Timeout);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serves_inbound_block_access_lists_request() {
+        let mut builder = SessionBuilder::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let fut = builder.with_client_stream(local_addr, async move |client_stream| {
+            let _client_stream = client_stream;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        tokio::task::spawn(fut);
+        let (incoming, _) = listener.accept().await.unwrap();
+        let mut session = builder.connect_incoming(incoming).await;
+
+        // An inbound request is served from the (default no-op) BAL store and queued for sending,
+        // echoing the peer's request id.
+        let outcome = session.on_incoming_snap_message(SnapProtocolMessage::GetBlockAccessLists(
+            GetBlockAccessListsMessage {
+                request_id: 11,
+                block_hashes: Vec::new(),
+                response_bytes: u64::MAX,
+            },
+        ));
+        assert!(matches!(outcome, OnIncomingMessageOutcome::Ok));
+
+        let queued = session.queued_outgoing.pop_front().expect("response queued");
+        assert!(matches!(
+            queued,
+            OutgoingMessage::Snap(SnapProtocolMessage::BlockAccessLists(m)) if m.request_id == 11
+        ));
     }
 
     #[test]

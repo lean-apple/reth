@@ -184,11 +184,12 @@ peer response -> on_incoming_snap_message
   forwards it to the first available snap-capable session. The session sends it via `start_send_snap`,
   records `request_id -> oneshot`, and resolves the oneshot when the matching response arrives. The
   client owns no peer state; its connected-peer count is a shared counter the manager maintains.
-- **Server (planned).** Inbound requests will be served from reth's existing stores: BALs from the
-  BAL store (`bal.rs`), and account/storage/code ranges from state. Per EIP-8189, missing BALs are
-  returned as empty entries, responses preserve request order, and the tail may be truncated to
-  respect the response byte / QoS limit. Today the session correlates responses but ignores inbound
-  requests.
+- **Server.** Inbound requests are served by `server.rs` (pure helpers called from the active
+  session). `GetBlockAccessLists` is served from the session's `BalStoreHandle` (threaded from
+  `NetworkConfig`, default no-op): per EIP-8189 missing BALs are empty entries, responses preserve
+  request order, the tail truncates at the response-byte / QoS limit, and the response echoes the
+  peer's `request_id`. Bulk-state ranges (`GetAccountRange` / `GetStorageRanges` / `GetByteCodes`)
+  are **not served yet** — they need range iteration + boundary proofs and land in a separate change.
 
 ---
 
@@ -245,6 +246,7 @@ Sync (`network/src/snap` and stages):
 | Path | Role |
 | --- | --- |
 | `client.rs` | `SnapClient`: dispatch requests, future per request |
+| `server.rs` | serve inbound requests from local stores (`GetBlockAccessLists` from the BAL store) |
 | `bal.rs` | `fetch_and_verify_bals`: fetch BALs and verify them against headers |
 | `verify.rs` | BAL hash + strict-order verification |
 | `sync.rs` | pure sync helpers: progress descriptor, BAL catch-up chunking |
@@ -259,10 +261,11 @@ Sync (`network/src/snap` and stages):
 version-aware decode (`decode_versioned`, rejecting `0x06`/`0x07`); negotiation into
 `EthRlpxConnection::EthSnap` and per-message dispatch in the active session; `SnapClient` request
 routing through the `SessionManager` to a snap-capable session and `request_id` response
-correlation; BAL fetch + verification and catch-up chunking.
+correlation; serving inbound `GetBlockAccessLists` from the session's `BalStoreHandle`; BAL fetch +
+verification and catch-up chunking.
 
-**Planned.** Serving inbound requests from the BAL/state provider inside the session
-(`on_incoming_snap_message` correlates responses but ignores inbound requests); exposing
-`SessionManager::snap_client` through the node/network handle to the sync stage; the account/storage
-range download state machine, range-proof verification, snapshot persistence, ordered BAL
-application, and the final state-root check inside `SnapSyncStage`.
+**Planned.** Serving bulk-state ranges (`GetAccountRange` / `GetStorageRanges` / `GetByteCodes`),
+which need range iteration + boundary proofs; exposing `SessionManager::snap_client` and the BAL
+store through the node/network handle (so a real provider replaces the default no-op store); the
+account/storage range download state machine, range-proof verification, snapshot persistence,
+ordered BAL application, and the final state-root check inside `SnapSyncStage`.
