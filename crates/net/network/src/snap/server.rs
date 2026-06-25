@@ -20,9 +20,16 @@ pub(crate) fn serve_snap_request(
         SnapProtocolMessage::GetBlockAccessLists(req) => {
             Some(SnapProtocolMessage::BlockAccessLists(serve_block_access_lists(bal_store, req)))
         }
-        // TODO(snap/2 server): serve bulk-state ranges (GetAccountRange / GetStorageRanges /
-        // GetByteCodes) once range iteration + boundary proofs land. Not served yet.
-        _ => None,
+        // Bulk-state ranges aren't served yet (they need range iteration + boundary proofs), and
+        // response messages are never inbound requests. Listing the variants keeps the match
+        // exhaustive, so a new snap message forces a decision here.
+        SnapProtocolMessage::GetAccountRange(_) |
+        SnapProtocolMessage::GetStorageRanges(_) |
+        SnapProtocolMessage::GetByteCodes(_) |
+        SnapProtocolMessage::AccountRange(_) |
+        SnapProtocolMessage::StorageRanges(_) |
+        SnapProtocolMessage::ByteCodes(_) |
+        SnapProtocolMessage::BlockAccessLists(_) => None,
     }
 }
 
@@ -99,6 +106,21 @@ mod tests {
         // Soft 1-byte limit: each missing entry counts 1 byte, the entry that crosses the limit is
         // included, and the tail is dropped.
         assert_eq!(resp.block_access_lists.0.len(), 2);
+    }
+
+    #[test]
+    fn truncates_block_hashes_to_the_serve_limit() {
+        let store = BalStoreHandle::default();
+        // More hashes than the per-request cap, with no byte limit in play.
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 1,
+                block_hashes: vec![B256::ZERO; MAX_BLOCK_ACCESS_LISTS_SERVE + 5],
+                response_bytes: u64::MAX,
+            },
+        );
+        assert_eq!(resp.block_access_lists.0.len(), MAX_BLOCK_ACCESS_LISTS_SERVE);
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //! checkpoints are owned by the [`Pipeline`](crate::Pipeline); this stage only drives the
 //! [`SnapClient`] and persists the downloaded state.
 //!
-//! Skeleton: state persistence is not yet wired, so the stage makes no progress and is not part of
-//! the default pipeline.
+//! Scaffolding: state download/persistence is not implemented, so `execute` fails explicitly rather
+//! than reporting progress, and the stage is not part of the default pipeline.
 
 use reth_network_p2p::snap::client::SnapClient;
 use reth_stages_api::{

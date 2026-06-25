@@ -477,6 +477,15 @@ impl CanDisconnect<Bytes> for UnauthEthProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        handshake::EthHandshake,
+        message::MAX_MESSAGE_SIZE,
+        test_utils::{connect_passthrough, eth_handshake, eth_hello},
+        UnauthedP2PStream,
+    };
+    use reth_eth_wire_types::snap::{BlockAccessListsMessage, GetBlockAccessListsMessage};
+    use tokio::net::TcpListener;
+    use tokio_util::codec::Decoder;
 
     // `snap/2` shares the connection right after `eth` (e.g. eth/69 reserves 17 ids), so the snap
     // capability sits at this relative offset in the combined message space and reserves 10 ids.
@@ -549,5 +558,79 @@ mod tests {
             &to_snap,
         )
         .is_err());
+    }
+
+    /// End-to-end: two peers negotiate `eth` + `snap/2`, then a `GetBlockAccessLists` request and
+    /// its `BlockAccessLists` response round-trip over live [`EthSnapStream`]s.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snap_request_response_round_trips_over_the_wire() {
+        reth_tracing::init_test_tracing();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let (status, fork_filter) = eth_handshake();
+        let server_status = status;
+        let server_fork_filter = fork_filter.clone();
+
+        // Server: accept, negotiate, and answer one GetBlockAccessLists echoing the request id.
+        let server = tokio::spawn(async move {
+            let (incoming, _) = listener.accept().await.unwrap();
+            let stream = crate::PassthroughCodec::default().framed(incoming);
+            let server_hello = eth_hello().0.with_snap(true);
+            let (conn, _) = UnauthedP2PStream::new(stream).handshake(server_hello).await.unwrap();
+
+            let (mut stream, _) = EthSnapStream::<_, EthNetworkPrimitives>::handshake(
+                conn,
+                server_status,
+                server_fork_filter,
+                Arc::new(EthHandshake::default()),
+                MAX_MESSAGE_SIZE,
+            )
+            .await
+            .unwrap();
+
+            while let Some(Ok(msg)) = stream.next().await {
+                if let EthSnapMessage::Snap(SnapProtocolMessage::GetBlockAccessLists(req)) = msg {
+                    let response = SnapProtocolMessage::BlockAccessLists(BlockAccessListsMessage {
+                        request_id: req.request_id,
+                        block_access_lists: reth_eth_wire_types::BlockAccessLists(vec![None]),
+                    });
+                    stream.send(EthSnapMessage::Snap(response)).await.unwrap();
+                }
+            }
+        });
+
+        // Client: connect, negotiate, send the request, and await the correlated response.
+        let conn = connect_passthrough(local_addr, eth_hello().0.with_snap(true)).await;
+        let (mut stream, _) = EthSnapStream::<_, EthNetworkPrimitives>::handshake(
+            conn,
+            status,
+            fork_filter,
+            Arc::new(EthHandshake::default()),
+            MAX_MESSAGE_SIZE,
+        )
+        .await
+        .unwrap();
+
+        stream
+            .send(EthSnapMessage::Snap(SnapProtocolMessage::GetBlockAccessLists(
+                GetBlockAccessListsMessage {
+                    request_id: 7,
+                    block_hashes: Vec::new(),
+                    response_bytes: u64::MAX,
+                },
+            )))
+            .await
+            .unwrap();
+
+        let response = loop {
+            if let EthSnapMessage::Snap(SnapProtocolMessage::BlockAccessLists(resp)) =
+                stream.next().await.unwrap().unwrap()
+            {
+                break resp;
+            }
+        };
+        assert_eq!(response.request_id, 7);
+
+        server.abort();
     }
 }

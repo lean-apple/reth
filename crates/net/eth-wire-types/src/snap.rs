@@ -479,6 +479,17 @@ mod tests {
     }
 
     #[test]
+    fn set_request_id_overwrites_the_id() {
+        let mut msg = SnapProtocolMessage::GetByteCodes(GetByteCodesMessage {
+            request_id: 1,
+            hashes: Vec::new(),
+            response_bytes: 0,
+        });
+        msg.set_request_id(42);
+        assert_eq!(msg.request_id(), 42);
+    }
+
+    #[test]
     fn decode_versioned_reports_malformed_body() {
         // A valid id (GetBlockAccessLists, 0x08) with a non-decodable body is an RLP error, not an
         // unsupported id.

@@ -1704,6 +1704,32 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_snap_response_is_ignored() {
+        let mut builder = SessionBuilder::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        let fut = builder.with_client_stream(local_addr, async move |client_stream| {
+            let _client_stream = client_stream;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        tokio::task::spawn(fut);
+        let (incoming, _) = listener.accept().await.unwrap();
+        let mut session = builder.connect_incoming(incoming).await;
+
+        // A response for a request we never sent must be dropped without panicking or queuing
+        // anything to send.
+        let outcome = session.on_incoming_snap_message(SnapProtocolMessage::BlockAccessLists(
+            BlockAccessListsMessage {
+                request_id: 999,
+                block_access_lists: BlockAccessLists(Vec::new()),
+            },
+        ));
+        assert!(matches!(outcome, OnIncomingMessageOutcome::Ok));
+        assert!(session.inflight_snap_requests.is_empty());
+        assert!(session.queued_outgoing.pop_front().is_none());
+    }
+
     #[test]
     fn eth72_pooled_hashes_count_broadcast_items() {
         let hashes =
