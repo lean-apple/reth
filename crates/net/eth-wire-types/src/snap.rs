@@ -274,6 +274,21 @@ impl SnapProtocolMessage {
         }
     }
 
+    /// Overwrites the `request_id`, e.g. so a session can assign a connection-unique id before
+    /// sending a request.
+    pub const fn set_request_id(&mut self, request_id: u64) {
+        match self {
+            Self::GetAccountRange(m) => m.request_id = request_id,
+            Self::AccountRange(m) => m.request_id = request_id,
+            Self::GetStorageRanges(m) => m.request_id = request_id,
+            Self::StorageRanges(m) => m.request_id = request_id,
+            Self::GetByteCodes(m) => m.request_id = request_id,
+            Self::ByteCodes(m) => m.request_id = request_id,
+            Self::GetBlockAccessLists(m) => m.request_id = request_id,
+            Self::BlockAccessLists(m) => m.request_id = request_id,
+        }
+    }
+
     /// Encode the message to bytes
     pub fn encode(&self) -> Bytes {
         let mut buf = Vec::new();

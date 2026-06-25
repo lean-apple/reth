@@ -248,9 +248,10 @@ where
                 _ => {}
             }
 
-            // Return the next decoded inbound `snap/2` message. An id invalid in snap/2 (the removed
-            // trie-node messages `0x06`/`0x07`), an unknown id, or a malformed payload is a protocol
-            // violation by the peer and surfaces as a protocol-breach error, not silently dropped.
+            // Return the next decoded inbound `snap/2` message. An id invalid in snap/2 (the
+            // removed trie-node messages `0x06`/`0x07`), an unknown id, or a malformed
+            // payload is a protocol violation by the peer and surfaces as a
+            // protocol-breach error, not silently dropped.
             if let Poll::Ready(Some(bytes)) = this.snap_inbound.poll_next_unpin(cx) {
                 return match SnapProtocolMessage::decode_versioned(SnapVersion::V2, &bytes) {
                     Ok(msg) => Poll::Ready(Some(Ok(EthSnapMessage::Snap(msg)))),
@@ -366,8 +367,9 @@ fn route_inbound(
 /// Rebases a snap-relative message id to the combined message space.
 #[inline]
 fn mask_snap(bytes: &mut BytesMut, snap_offset: u8) -> Result<(), io::Error> {
-    let id = bytes.first().ok_or(io::Error::from(io::ErrorKind::InvalidInput))?;
-    bytes[0] = id.checked_add(snap_offset).ok_or(io::Error::from(io::ErrorKind::InvalidInput))?;
+    let id = bytes.first().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    bytes[0] =
+        id.checked_add(snap_offset).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
     Ok(())
 }
 
@@ -487,8 +489,14 @@ mod tests {
         let (to_snap, mut snap_rx) = mpsc::unbounded_channel();
 
         // An `eth` message (combined id < snap offset) passes through unchanged.
-        route_inbound(BytesMut::from(&[5u8, 0xaa][..]), SNAP_OFFSET, SNAP_MESSAGES, &to_eth, &to_snap)
-            .unwrap();
+        route_inbound(
+            BytesMut::from(&[5u8, 0xaa][..]),
+            SNAP_OFFSET,
+            SNAP_MESSAGES,
+            &to_eth,
+            &to_snap,
+        )
+        .unwrap();
         // A `snap/2` GetBlockAccessLists (0x08) arrives at combined id `SNAP_OFFSET + 8`.
         route_inbound(
             BytesMut::from(&[SNAP_OFFSET + 8, 0xbb][..]),
@@ -522,8 +530,9 @@ mod tests {
     fn route_inbound_rejects_empty_message() {
         let (to_eth, _eth_rx) = mpsc::unbounded_channel();
         let (to_snap, _snap_rx) = mpsc::unbounded_channel();
-        assert!(route_inbound(BytesMut::new(), SNAP_OFFSET, SNAP_MESSAGES, &to_eth, &to_snap)
-            .is_err());
+        assert!(
+            route_inbound(BytesMut::new(), SNAP_OFFSET, SNAP_MESSAGES, &to_eth, &to_snap).is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! Network-facing `snap/2` sync client.
 
-use crate::snap::peers::{SnapPeerRequest, SnapPeers};
 use reth_eth_wire_types::snap::{
     GetAccountRangeMessage, GetBlockAccessListsMessage, GetByteCodesMessage,
     GetStorageRangesMessage, SnapProtocolMessage,
@@ -16,31 +15,53 @@ use std::{
     fmt,
     future::Future,
     pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
-/// A [`SnapClient`](SnapClientTrait) that dispatches requests to connected `snap/2` peers.
+/// A `snap/2` client request routed to a snap-capable session by the
+/// [`SessionManager`](crate::session::SessionManager).
+#[derive(Debug)]
+pub struct SnapPeerRequest {
+    /// The request to send to the peer.
+    pub(crate) request: SnapProtocolMessage,
+    /// Channel the session uses to return the correlated response.
+    pub(crate) response: oneshot::Sender<PeerRequestResult<SnapResponse>>,
+}
+
+/// A [`SnapClient`](SnapClientTrait) that dispatches requests to a snap-capable session through the
+/// [`SessionManager`](crate::session::SessionManager).
 ///
-/// Cloning shares the same peer registry. The stream implementation that negotiates snap support is
-/// responsible for registering per-peer request channels in that registry.
+/// The client does not own any peer state: it forwards each request to the manager, which routes it
+/// to a session that negotiated `snap/2` (see [`EthSnapStream`](reth_eth_wire::EthSnapStream)) and
+/// correlates the response. Cloning shares the same routing channel and peer count.
 #[derive(Clone, Debug)]
 pub struct SnapClient {
-    peers: SnapPeers,
+    /// Routes requests to the session manager, which forwards them to a snap-capable session.
+    to_manager: mpsc::UnboundedSender<SnapPeerRequest>,
+    /// Number of connected snap-capable peers, maintained by the session manager.
+    peer_count: Arc<AtomicUsize>,
 }
 
 impl SnapClient {
-    pub(crate) const fn new(peers: SnapPeers) -> Self {
-        Self { peers }
+    /// Creates a new client backed by the manager's routing channel and shared peer count.
+    pub(crate) const fn new(
+        to_manager: mpsc::UnboundedSender<SnapPeerRequest>,
+        peer_count: Arc<AtomicUsize>,
+    ) -> Self {
+        Self { to_manager, peer_count }
     }
 
-    /// Dispatches a request to any connected `snap/2` peer.
+    /// Routes a request to a snap-capable session via the manager.
     fn request(&self, request: SnapProtocolMessage) -> SnapResponseFuture {
         let (tx, rx) = oneshot::channel();
-        let req = SnapPeerRequest { request, response: tx };
-        match self.peers.send_to_any(req) {
-            Ok(_peer) => SnapResponseFuture::pending(rx),
-            // No peer with snap/2 is available to serve the request.
+        match self.to_manager.send(SnapPeerRequest { request, response: tx }) {
+            Ok(()) => SnapResponseFuture::pending(rx),
+            // The session manager is gone; no peer can serve the request.
             Err(_) => SnapResponseFuture::ready_err(RequestError::UnsupportedCapability),
         }
     }
@@ -52,7 +73,7 @@ impl DownloadClient for SnapClient {
     }
 
     fn num_connected_peers(&self) -> usize {
-        self.peers.len()
+        self.peer_count.load(Ordering::Relaxed)
     }
 }
 
@@ -102,7 +123,7 @@ impl SnapClientTrait for SnapClient {
 
 /// Future resolving to a `snap/2` peer response.
 ///
-/// Either awaits a peer connection's reply or resolves immediately with an error (e.g. when no
+/// Either awaits a session's correlated reply or resolves immediately with an error (e.g. when no
 /// snap/2 peer is available).
 pub struct SnapResponseFuture {
     rx: Option<oneshot::Receiver<PeerRequestResult<SnapResponse>>>,
@@ -149,63 +170,41 @@ mod tests {
     use super::*;
     use reth_eth_wire_types::{snap::BlockAccessListsMessage, BlockAccessLists};
     use reth_network_peers::WithPeerId;
-    use tokio::sync::mpsc;
 
-    fn empty_account_range_request(request_id: u64) -> GetAccountRangeMessage {
-        GetAccountRangeMessage {
-            request_id,
-            root_hash: Default::default(),
-            starting_hash: Default::default(),
-            limit_hash: Default::default(),
-            response_bytes: 0,
-        }
+    fn client() -> (SnapClient, mpsc::UnboundedReceiver<SnapPeerRequest>, Arc<AtomicUsize>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let count = Arc::new(AtomicUsize::new(0));
+        (SnapClient::new(tx, Arc::clone(&count)), rx, count)
     }
 
-    fn empty_storage_ranges_request(request_id: u64) -> GetStorageRangesMessage {
-        GetStorageRangesMessage {
-            request_id,
-            root_hash: Default::default(),
-            account_hashes: Vec::new(),
-            starting_hash: Default::default(),
-            limit_hash: Default::default(),
-            response_bytes: 0,
-        }
-    }
-
-    fn empty_byte_codes_request(request_id: u64) -> GetByteCodesMessage {
-        GetByteCodesMessage { request_id, hashes: Vec::new(), response_bytes: 0 }
-    }
-
-    fn empty_block_access_lists_request(request_id: u64) -> GetBlockAccessListsMessage {
+    fn block_access_lists_request(request_id: u64) -> GetBlockAccessListsMessage {
         GetBlockAccessListsMessage { request_id, block_hashes: Vec::new(), response_bytes: 0 }
     }
 
     #[tokio::test]
-    async fn request_without_peers_is_unsupported() {
-        let client = SnapClient::new(SnapPeers::default());
-        let res = client.get_block_access_lists(empty_block_access_lists_request(1)).await;
+    async fn request_without_manager_is_unsupported() {
+        let (client, rx, _count) = client();
+        drop(rx);
+        let res = client.get_block_access_lists(block_access_lists_request(1)).await;
         assert!(matches!(res, Err(RequestError::UnsupportedCapability)));
     }
 
     #[tokio::test]
-    async fn registered_peer_receives_block_access_lists_request() {
-        let peers = SnapPeers::default();
-        let client = SnapClient::new(peers.clone());
-        let peer = PeerId::random();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        peers.register(peer, tx);
+    async fn request_is_routed_and_response_is_correlated() {
+        let (client, mut rx, _count) = client();
 
-        let response = client.get_block_access_lists(empty_block_access_lists_request(9));
-        let request = rx.recv().await.expect("request delivered to registered peer");
+        let response = client.get_block_access_lists(block_access_lists_request(9));
+        let routed = rx.recv().await.expect("request routed to manager");
         assert!(matches!(
-            request.request,
+            routed.request,
             SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
                 request_id: 9,
                 ..
             })
         ));
 
-        request
+        let peer = PeerId::random();
+        routed
             .response
             .send(Ok(WithPeerId::new(
                 peer,
@@ -225,64 +224,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_peer_sender_is_pruned() {
-        let peers = SnapPeers::default();
-        let client = SnapClient::new(peers.clone());
-        let (tx, rx) = mpsc::unbounded_channel();
-        peers.register(PeerId::random(), tx);
-        assert_eq!(client.num_connected_peers(), 1);
+    async fn response_future_returns_channel_closed_if_session_drops() {
+        let (client, mut rx, _count) = client();
+        let response = client.get_block_access_lists(block_access_lists_request(1));
+        // The session takes the request but drops the response channel (e.g. disconnect).
+        drop(rx.recv().await.unwrap().response);
+        assert_eq!(response.await.unwrap_err(), RequestError::ChannelClosed);
+        let _ = rx;
+    }
 
-        drop(rx);
-
-        let res = client.get_block_access_lists(empty_block_access_lists_request(1)).await;
-        assert!(matches!(res, Err(RequestError::UnsupportedCapability)));
+    #[test]
+    fn num_connected_peers_reflects_shared_count() {
+        let (client, _rx, count) = client();
         assert_eq!(client.num_connected_peers(), 0);
-    }
-
-    #[tokio::test]
-    async fn response_future_returns_channel_closed_if_sender_drops() {
-        let (tx, rx) = oneshot::channel();
-        let response = SnapResponseFuture::pending(rx);
-
-        drop(tx);
-
-        let err = response.await.unwrap_err();
-        assert_eq!(err, RequestError::ChannelClosed);
-    }
-
-    #[tokio::test]
-    async fn request_methods_wrap_expected_snap_messages() {
-        let peers = SnapPeers::default();
-        let client = SnapClient::new(peers.clone());
-        let peer = PeerId::random();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        peers.register(peer, tx);
-
-        let _account = client.get_account_range(empty_account_range_request(1));
-        assert!(matches!(
-            rx.recv().await.unwrap().request,
-            SnapProtocolMessage::GetAccountRange(GetAccountRangeMessage { request_id: 1, .. })
-        ));
-
-        let _storage = client.get_storage_ranges(empty_storage_ranges_request(2));
-        assert!(matches!(
-            rx.recv().await.unwrap().request,
-            SnapProtocolMessage::GetStorageRanges(GetStorageRangesMessage { request_id: 2, .. })
-        ));
-
-        let _byte_codes = client.get_byte_codes(empty_byte_codes_request(3));
-        assert!(matches!(
-            rx.recv().await.unwrap().request,
-            SnapProtocolMessage::GetByteCodes(GetByteCodesMessage { request_id: 3, .. })
-        ));
-
-        let _bals = client.get_block_access_lists(empty_block_access_lists_request(4));
-        assert!(matches!(
-            rx.recv().await.unwrap().request,
-            SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
-                request_id: 4,
-                ..
-            })
-        ));
+        count.store(3, Ordering::Relaxed);
+        assert_eq!(client.num_connected_peers(), 3);
     }
 }

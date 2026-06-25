@@ -56,6 +56,12 @@ impl<N: NetworkPrimitives> EthRlpxConnection<N> {
         }
     }
 
+    /// Returns `true` if `snap/2` was negotiated on this connection.
+    #[inline]
+    pub(crate) const fn supports_snap(&self) -> bool {
+        matches!(self, Self::EthSnap(_))
+    }
+
     /// Consumes this type and returns the wrapped [`P2PStream`].
     #[inline]
     pub(crate) fn into_inner(self) -> P2PStream<ECIESStream<TcpStream>> {

@@ -179,15 +179,16 @@ peer response -> on_incoming_snap_message
   └─ correlate request_id -> oneshot -> SnapClient
 ```
 
-- **Client.** `SnapClient` (`network/src/snap/client.rs`, implementing the
+- **Client (wired).** `SnapClient` (`network/src/snap/client.rs`, implementing the
   `reth_network_p2p::snap::client::SnapClient` trait) hands a request to the `SessionManager`, which
-  forwards it to any snap-capable session (round-robin / first-available). The session sends it via
-  `start_send_snap`, records `request_id -> oneshot`, and resolves the oneshot when the matching
-  response arrives. Missing/empty entries must not trigger endless refetch.
-- **Server.** Inbound requests are served from reth's existing stores: BALs from the BAL store
-  (`bal.rs`), and account/storage/code ranges from state. Per EIP-8189, missing BALs are returned as
-  empty entries, responses preserve request order, and the tail may be truncated to respect the
-  response byte / QoS limit.
+  forwards it to the first available snap-capable session. The session sends it via `start_send_snap`,
+  records `request_id -> oneshot`, and resolves the oneshot when the matching response arrives. The
+  client owns no peer state; its connected-peer count is a shared counter the manager maintains.
+- **Server (planned).** Inbound requests will be served from reth's existing stores: BALs from the
+  BAL store (`bal.rs`), and account/storage/code ranges from state. Per EIP-8189, missing BALs are
+  returned as empty entries, responses preserve request order, and the tail may be truncated to
+  respect the response byte / QoS limit. Today the session correlates responses but ignores inbound
+  requests.
 
 ---
 
@@ -256,11 +257,12 @@ Sync (`network/src/snap` and stages):
 **Wired and tested.** Capability advertisement (`with_snap`, default-off); the dedicated
 `EthSnapStream` (standalone demux + concurrent handshake) and the `EthSnapMessage` enum;
 version-aware decode (`decode_versioned`, rejecting `0x06`/`0x07`); negotiation into
-`EthRlpxConnection::EthSnap` and per-message dispatch in the active session; BAL serve helpers, BAL
-fetch + verification, and catch-up chunking.
+`EthRlpxConnection::EthSnap` and per-message dispatch in the active session; `SnapClient` request
+routing through the `SessionManager` to a snap-capable session and `request_id` response
+correlation; BAL fetch + verification and catch-up chunking.
 
-**Planned.** Routing `SnapClient` requests through the `SessionManager` to a snap-capable session and
-correlating responses (`on_incoming_snap_message` currently logs and drops); serving inbound requests
-from the BAL/state provider inside the session; the account/storage range download state machine,
-range-proof verification, snapshot persistence, ordered BAL application, and the final state-root
-check inside `SnapSyncStage`.
+**Planned.** Serving inbound requests from the BAL/state provider inside the session
+(`on_incoming_snap_message` correlates responses but ignores inbound requests); exposing
+`SessionManager::snap_client` through the node/network handle to the sync stage; the account/storage
+range download state machine, range-proof verification, snapshot persistence, ordered BAL
+application, and the final state-root check inside `SnapSyncStage`.
