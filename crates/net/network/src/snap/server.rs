@@ -61,8 +61,54 @@ fn serve_block_access_lists(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::B256;
+    use alloy_primitives::{Bytes, B256};
     use reth_eth_wire_types::snap::GetByteCodesMessage;
+    use reth_storage_api::{errors::provider::ProviderResult, BalNotificationStream, BalStore};
+    use std::collections::HashMap;
+
+    /// In-memory BAL store returning fixed bytes for known hashes, `None` otherwise.
+    #[derive(Debug)]
+    struct InMemoryBalStore(HashMap<B256, Bytes>);
+
+    impl BalStore for InMemoryBalStore {
+        fn insert(
+            &self,
+            _: alloy_eips::NumHash,
+            _: alloy_eip7928::bal::RawBal,
+        ) -> ProviderResult<()> {
+            Ok(())
+        }
+        fn prune(&self, _: u64) -> ProviderResult<usize> {
+            Ok(0)
+        }
+        fn get_by_hashes(&self, block_hashes: &[B256]) -> ProviderResult<Vec<Option<Bytes>>> {
+            Ok(block_hashes.iter().map(|h| self.0.get(h).cloned()).collect())
+        }
+        fn bal_stream(&self) -> BalNotificationStream {
+            reth_tokio_util::EventSender::new(1).new_listener()
+        }
+    }
+
+    #[test]
+    fn serves_present_bal_bytes_with_missing_as_empty() {
+        let present = B256::with_last_byte(1);
+        let missing = B256::with_last_byte(2);
+        let raw = Bytes::from_static(&[0x42]);
+        let store = BalStoreHandle::new(InMemoryBalStore([(present, raw.clone())].into()));
+
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 5,
+                block_hashes: vec![present, missing],
+                response_bytes: u64::MAX,
+            },
+        );
+
+        assert_eq!(resp.request_id, 5);
+        // Present hash returns its bytes; missing hash is an empty entry; request order preserved.
+        assert_eq!(resp.block_access_lists.0, vec![Some(raw), None]);
+    }
 
     #[test]
     fn serves_bals_in_request_order_with_missing_as_empty() {
