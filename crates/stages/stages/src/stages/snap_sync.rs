@@ -3,7 +3,7 @@
 //! Downloads account/storage/code ranges at a frozen pivot, then applies verified block access list
 //! diffs up to the head and checks the state root. Pivot selection, restart on reorg and progress
 //! checkpoints are owned by the [`Pipeline`](crate::Pipeline); this stage only drives the
-//! [`SnapClient`] and persists the downloaded state.
+//! [`SnapClient`](reth_network_p2p::snap::client::SnapClient) and persists the downloaded state.
 //!
 //! Scaffolding: state download/persistence is not implemented, so `execute` fails explicitly rather
 //! than reporting progress, and the stage is not part of the default pipeline.
