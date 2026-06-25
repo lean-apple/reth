@@ -1079,7 +1079,10 @@ impl<N: NetworkPrimitives> OutgoingMessage<N> {
     const fn is_response(&self) -> bool {
         match self {
             Self::Eth(msg) => msg.is_response(),
-            _ => false,
+            // Served snap responses count toward response backpressure; outbound snap requests do
+            // not. `SnapProtocolMessage::is_response` distinguishes the two.
+            Self::Snap(msg) => msg.is_response(),
+            Self::Broadcast(_) | Self::Raw(_) => false,
         }
     }
 

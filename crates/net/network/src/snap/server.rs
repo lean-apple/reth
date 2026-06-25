@@ -38,7 +38,13 @@ fn serve_block_access_lists(
     req.block_hashes.truncate(MAX_BLOCK_ACCESS_LISTS_SERVE);
     let soft_limit = (req.response_bytes as usize).min(SOFT_RESPONSE_LIMIT);
     let limit = GetBlockAccessListLimit::ResponseSizeSoftLimit(soft_limit);
-    let lists = bal_store.get_by_hashes_with_limit(&req.block_hashes, limit).unwrap_or_default();
+    let lists =
+        bal_store.get_by_hashes_with_limit(&req.block_hashes, limit).unwrap_or_else(|err| {
+            // A backend failure must not look like a deliberate empty response; surface it for
+            // observability and fall back to an empty list.
+            tracing::debug!(target: "net::snap", %err, "failed to load block access lists");
+            Vec::new()
+        });
     BlockAccessListsMessage {
         request_id: req.request_id,
         block_access_lists: BlockAccessLists(lists),

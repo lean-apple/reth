@@ -274,6 +274,17 @@ impl SnapProtocolMessage {
         }
     }
 
+    /// Returns `true` if this is a response message (as opposed to a request).
+    pub const fn is_response(&self) -> bool {
+        matches!(
+            self,
+            Self::AccountRange(_) |
+                Self::StorageRanges(_) |
+                Self::ByteCodes(_) |
+                Self::BlockAccessLists(_)
+        )
+    }
+
     /// Overwrites the `request_id`, e.g. so a session can assign a connection-unique id before
     /// sending a request.
     pub const fn set_request_id(&mut self, request_id: u64) {
@@ -450,6 +461,21 @@ mod tests {
             SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[]),
             Err(SnapProtocolError::Empty)
         ));
+    }
+
+    #[test]
+    fn is_response_classifies_requests_and_responses() {
+        let request = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+            request_id: 1,
+            block_hashes: Vec::new(),
+            response_bytes: 0,
+        });
+        let response = SnapProtocolMessage::BlockAccessLists(BlockAccessListsMessage {
+            request_id: 1,
+            block_access_lists: BlockAccessLists(Vec::new()),
+        });
+        assert!(!request.is_response());
+        assert!(response.is_response());
     }
 
     #[test]

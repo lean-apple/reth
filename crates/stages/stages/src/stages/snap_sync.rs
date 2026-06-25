@@ -50,10 +50,10 @@ where
     fn execute(
         &mut self,
         _provider: &Provider,
-        input: ExecInput,
+        _input: ExecInput,
     ) -> Result<ExecOutput, StageError> {
-        // Skeleton: state persistence is not yet implemented, so no progress is made.
-        Ok(ExecOutput { checkpoint: input.checkpoint(), done: true })
+        // Not implemented yet; fail explicitly instead of reporting a no-op success.
+        Err(StageError::Fatal("SnapSync stage is not implemented yet".into()))
     }
 
     fn unwind(

@@ -30,6 +30,23 @@ pub enum BalFetchError {
     /// The peer replied with a message other than `BlockAccessLists`.
     #[error("peer responded with an unexpected snap message")]
     UnexpectedResponse,
+    /// The response carried a different `request_id` than was requested.
+    #[error("snap response request id mismatch: expected {expected}, got {got}")]
+    RequestIdMismatch {
+        /// The requested `request_id`.
+        expected: u64,
+        /// The `request_id` the peer returned.
+        got: u64,
+    },
+    /// The response carried more BAL entries than were requested (responses may truncate from the
+    /// tail, but must not extend beyond the request).
+    #[error("snap response has {got} entries but only {requested} were requested")]
+    TooManyEntries {
+        /// The number of requested blocks.
+        requested: usize,
+        /// The number of entries the peer returned.
+        got: usize,
+    },
 }
 
 /// Fetches and verifies BALs for the given blocks, in order, from a snap/2 peer.
@@ -53,6 +70,22 @@ pub async fn fetch_and_verify_bals<C: SnapClient>(
     let SnapResponse::BlockAccessLists(message) = response.into_data() else {
         return Err(BalFetchError::UnexpectedResponse);
     };
+
+    // The helper is generic over any `SnapClient`, so validate the response shape ourselves rather
+    // than relying on the caller's correlation: the id must match and the response must not extend
+    // beyond the request (truncation from the tail is allowed).
+    if message.request_id != request_id {
+        return Err(BalFetchError::RequestIdMismatch {
+            expected: request_id,
+            got: message.request_id,
+        });
+    }
+    if message.block_access_lists.0.len() > blocks.len() {
+        return Err(BalFetchError::TooManyEntries {
+            requested: blocks.len(),
+            got: message.block_access_lists.0.len(),
+        });
+    }
 
     // Zip the returned prefix back with the requested blocks and verify in strict order.
     let items = blocks
@@ -204,5 +237,35 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, BalFetchError::Verify(BalVerifyError::Missing(_))));
+    }
+
+    #[tokio::test]
+    async fn rejects_response_with_mismatched_request_id() {
+        // `client_returning` answers with request_id 1; request a different id.
+        let client = client_returning(vec![Some(empty_bal_raw())]);
+        let err = fetch_and_verify_bals(
+            &client,
+            9,
+            &[BalRequest { block_hash: B256::with_last_byte(1), expected_hash: empty_bal_hash() }],
+            u64::MAX,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, BalFetchError::RequestIdMismatch { expected: 9, got: 1 }));
+    }
+
+    #[tokio::test]
+    async fn rejects_response_with_more_entries_than_requested() {
+        // Two entries returned for a single requested block.
+        let client = client_returning(vec![Some(empty_bal_raw()), Some(empty_bal_raw())]);
+        let err = fetch_and_verify_bals(
+            &client,
+            1,
+            &[BalRequest { block_hash: B256::with_last_byte(1), expected_hash: empty_bal_hash() }],
+            u64::MAX,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, BalFetchError::TooManyEntries { requested: 1, got: 2 }));
     }
 }
