@@ -9114,6 +9114,7 @@ name = "reth-network"
 version = "2.3.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",

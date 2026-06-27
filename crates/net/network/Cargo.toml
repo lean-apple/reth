@@ -37,6 +37,7 @@ reth-network-types = { workspace = true, features = ["serde"] }
 
 # ethereum
 alloy-consensus.workspace = true
+alloy-eip7928.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
@@ -107,6 +108,7 @@ serde = [
     "reth-eth-wire/serde",
     "reth-eth-wire-types/serde",
     "alloy-consensus/serde",
+    "alloy-eip7928/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "discv5/serde",

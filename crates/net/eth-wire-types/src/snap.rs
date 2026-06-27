@@ -436,6 +436,54 @@ mod tests {
     }
 
     #[test]
+    fn decode_versioned_round_trips_framed_message() {
+        let original = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+            request_id: 7,
+            block_hashes: vec![b256_from_u64(1)],
+            response_bytes: 1024,
+        });
+        let framed = original.encode();
+        let decoded = SnapProtocolMessage::decode_versioned(SnapVersion::V2, &framed).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn is_response_classifies_requests_and_responses() {
+        let request = SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+            request_id: 1,
+            block_hashes: Vec::new(),
+            response_bytes: 0,
+        });
+        let response = SnapProtocolMessage::BlockAccessLists(BlockAccessListsMessage {
+            request_id: 1,
+            block_access_lists: BlockAccessLists(Vec::new()),
+        });
+        assert!(!request.is_response());
+        assert!(response.is_response());
+    }
+
+    #[test]
+    fn set_request_id_overwrites_the_id() {
+        let mut msg = SnapProtocolMessage::GetByteCodes(GetByteCodesMessage {
+            request_id: 1,
+            hashes: Vec::new(),
+            response_bytes: 0,
+        });
+        msg.set_request_id(42);
+        assert_eq!(msg.request_id(), 42);
+    }
+
+    #[test]
+    fn decode_versioned_reports_malformed_body() {
+        // A valid id (GetBlockAccessLists, 0x08) with a non-decodable body is an RLP error, not an
+        // unsupported id.
+        assert!(matches!(
+            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[0x08, 0xff]),
+            Err(SnapProtocolError::Rlp(_))
+        ));
+    }
+
+    #[test]
     fn test_all_message_roundtrips() {
         assert_eq!(SnapVersion::V2.message_count(), 10);
 
@@ -649,16 +697,6 @@ mod tests {
                 Err(SnapProtocolError::UnsupportedMessageId(got, SnapVersion::V2)) if got == id
             ));
         }
-    }
-
-    #[test]
-    fn decode_versioned_reports_malformed_body() {
-        // A valid id (GetBlockAccessLists, 0x08) with a non-decodable body is an RLP error, not an
-        // unsupported id.
-        assert!(matches!(
-            SnapProtocolMessage::decode_versioned(SnapVersion::V2, &[0x08, 0xff]),
-            Err(SnapProtocolError::Rlp(_))
-        ));
     }
 
     #[test]

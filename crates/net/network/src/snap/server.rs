@@ -1,0 +1,199 @@
+//! Serving inbound `snap/2` requests from local stores.
+//!
+//! Pure helpers called from the active session: given an inbound request and the session's stores,
+//! they produce the response to send back. No connection/IO state lives here.
+
+use crate::eth_requests::{MAX_BLOCK_ACCESS_LISTS_SERVE, SOFT_RESPONSE_LIMIT};
+use reth_eth_wire_types::{
+    snap::{BlockAccessListsMessage, GetBlockAccessListsMessage, SnapProtocolMessage},
+    BlockAccessLists,
+};
+use reth_storage_api::{BalStoreHandle, GetBlockAccessListLimit};
+
+/// Serves an inbound `snap/2` request, returning the response to send back, or `None` if the
+/// request type is not served yet.
+pub(crate) fn serve_snap_request(
+    bal_store: &BalStoreHandle,
+    request: SnapProtocolMessage,
+) -> Option<SnapProtocolMessage> {
+    match request {
+        SnapProtocolMessage::GetBlockAccessLists(req) => {
+            Some(SnapProtocolMessage::BlockAccessLists(serve_block_access_lists(bal_store, req)))
+        }
+        // Bulk-state ranges aren't served yet (they need range iteration + boundary proofs), and
+        // response messages are never inbound requests. Listing the variants keeps the match
+        // exhaustive, so a new snap message forces a decision here.
+        SnapProtocolMessage::GetAccountRange(_) |
+        SnapProtocolMessage::GetStorageRanges(_) |
+        SnapProtocolMessage::GetByteCodes(_) |
+        SnapProtocolMessage::AccountRange(_) |
+        SnapProtocolMessage::StorageRanges(_) |
+        SnapProtocolMessage::ByteCodes(_) |
+        SnapProtocolMessage::BlockAccessLists(_) => None,
+    }
+}
+
+/// Serves a `GetBlockAccessLists` request from the BAL store.
+///
+/// Entries are returned in request order with unavailable BALs as empty (`None`) entries,
+/// truncating from the tail once the soft byte limit is exceeded (EIP-8189). The response echoes
+/// the peer's `request_id`.
+fn serve_block_access_lists(
+    bal_store: &BalStoreHandle,
+    mut req: GetBlockAccessListsMessage,
+) -> BlockAccessListsMessage {
+    req.block_hashes.truncate(MAX_BLOCK_ACCESS_LISTS_SERVE);
+    let soft_limit = (req.response_bytes as usize).min(SOFT_RESPONSE_LIMIT);
+    let limit = GetBlockAccessListLimit::ResponseSizeSoftLimit(soft_limit);
+    let lists =
+        bal_store.get_by_hashes_with_limit(&req.block_hashes, limit).unwrap_or_else(|err| {
+            // A backend failure must not look like a deliberate empty response; surface it for
+            // observability and fall back to an empty list.
+            tracing::debug!(target: "net::snap", %err, "failed to load block access lists");
+            Vec::new()
+        });
+    BlockAccessListsMessage {
+        request_id: req.request_id,
+        block_access_lists: BlockAccessLists(lists),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Bytes, B256};
+    use reth_eth_wire_types::snap::GetByteCodesMessage;
+    use reth_storage_api::{errors::provider::ProviderResult, BalNotificationStream, BalStore};
+    use std::collections::HashMap;
+
+    /// In-memory BAL store returning fixed bytes for known hashes, `None` otherwise.
+    #[derive(Debug)]
+    struct InMemoryBalStore(HashMap<B256, Bytes>);
+
+    impl BalStore for InMemoryBalStore {
+        fn insert(
+            &self,
+            _: alloy_eips::NumHash,
+            _: alloy_eip7928::bal::RawBal,
+        ) -> ProviderResult<()> {
+            Ok(())
+        }
+        fn prune(&self, _: u64) -> ProviderResult<usize> {
+            Ok(0)
+        }
+        fn get_by_hashes(&self, block_hashes: &[B256]) -> ProviderResult<Vec<Option<Bytes>>> {
+            Ok(block_hashes.iter().map(|h| self.0.get(h).cloned()).collect())
+        }
+        fn bal_stream(&self) -> BalNotificationStream {
+            reth_tokio_util::EventSender::new(1).new_listener()
+        }
+    }
+
+    #[test]
+    fn serves_present_bal_bytes_with_missing_as_empty() {
+        let present = B256::with_last_byte(1);
+        let missing = B256::with_last_byte(2);
+        let raw = Bytes::from_static(&[0x42]);
+        let store = BalStoreHandle::new(InMemoryBalStore([(present, raw.clone())].into()));
+
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 5,
+                block_hashes: vec![present, missing],
+                response_bytes: u64::MAX,
+            },
+        );
+
+        assert_eq!(resp.request_id, 5);
+        // Present hash returns its bytes; missing hash is an empty entry; request order preserved.
+        assert_eq!(resp.block_access_lists.0, vec![Some(raw), None]);
+    }
+
+    #[test]
+    fn serves_bals_in_request_order_with_missing_as_empty() {
+        // The default store is a no-op: every hash resolves to a missing (None) entry.
+        let store = BalStoreHandle::default();
+        let hashes =
+            vec![B256::with_last_byte(1), B256::with_last_byte(2), B256::with_last_byte(3)];
+
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 42,
+                block_hashes: hashes.clone(),
+                response_bytes: u64::MAX,
+            },
+        );
+
+        assert_eq!(resp.request_id, 42, "response echoes the peer's request id");
+        assert_eq!(resp.block_access_lists.0.len(), hashes.len(), "one entry per requested hash");
+        assert!(
+            resp.block_access_lists.0.iter().all(Option::is_none),
+            "missing BALs are empty entries"
+        );
+    }
+
+    #[test]
+    fn serves_bals_truncates_from_tail_on_soft_limit() {
+        let store = BalStoreHandle::default();
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 1,
+                block_hashes: vec![
+                    B256::with_last_byte(1),
+                    B256::with_last_byte(2),
+                    B256::with_last_byte(3),
+                ],
+                response_bytes: 1,
+            },
+        );
+        // Soft 1-byte limit: each missing entry counts 1 byte, the entry that crosses the limit is
+        // included, and the tail is dropped.
+        assert_eq!(resp.block_access_lists.0.len(), 2);
+    }
+
+    #[test]
+    fn truncates_block_hashes_to_the_serve_limit() {
+        let store = BalStoreHandle::default();
+        // More hashes than the per-request cap, with no byte limit in play.
+        let resp = serve_block_access_lists(
+            &store,
+            GetBlockAccessListsMessage {
+                request_id: 1,
+                block_hashes: vec![B256::ZERO; MAX_BLOCK_ACCESS_LISTS_SERVE + 5],
+                response_bytes: u64::MAX,
+            },
+        );
+        assert_eq!(resp.block_access_lists.0.len(), MAX_BLOCK_ACCESS_LISTS_SERVE);
+    }
+
+    #[test]
+    fn serve_dispatches_block_access_lists() {
+        let store = BalStoreHandle::default();
+        let response = serve_snap_request(
+            &store,
+            SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+                request_id: 7,
+                block_hashes: vec![B256::with_last_byte(1)],
+                response_bytes: u64::MAX,
+            }),
+        );
+        assert!(matches!(
+            response,
+            Some(SnapProtocolMessage::BlockAccessLists(m)) if m.request_id == 7
+        ));
+    }
+
+    #[test]
+    fn does_not_serve_bulk_state_requests_yet() {
+        let store = BalStoreHandle::default();
+        let request = SnapProtocolMessage::GetByteCodes(GetByteCodesMessage {
+            request_id: 1,
+            hashes: Vec::new(),
+            response_bytes: 0,
+        });
+        assert!(serve_snap_request(&store, request).is_none());
+    }
+}
