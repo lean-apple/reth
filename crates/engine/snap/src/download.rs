@@ -16,6 +16,7 @@ use alloy_primitives::{
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::{
     AccountData, GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage, StorageData,
+    StorageRangesMessage,
 };
 use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
 use reth_network_peers::PeerId;
@@ -33,6 +34,12 @@ const BYTECODE_BATCH_SIZE: usize = 50;
 
 /// Upper bound of the hashed key space.
 const MAX_HASH: B256 = B256::new([0xff; 32]);
+
+/// How many peers a single request is tried against before the download gives up.
+///
+/// A peer that answers with something unusable is reported and the request reissued, so one bad
+/// peer costs a round trip rather than the whole sync.
+const MAX_REQUEST_ATTEMPTS: usize = 3;
 
 /// Downloads the hashed state at one state root from snap peers.
 #[derive(Debug)]
@@ -71,41 +78,13 @@ where
             // storage and code are never left half-written against a root we stopped trusting.
             let batch_start = cursor;
 
-            let request_id = self.next_request_id();
-            let response = self
-                .client
-                .get_account_range(GetAccountRangeMessage {
-                    request_id,
-                    root_hash: self.root_hash,
-                    starting_hash: cursor,
-                    limit_hash: MAX_HASH,
-                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-                })
-                .await
-                .map_err(|err| {
-                    SnapSyncError::Network(format!("snap account range request failed: {err}"))
-                })?;
-
-            let (peer, data) = response.split();
-            let SnapResponse::AccountRange(msg) = data else {
-                return self.reject(
-                    peer,
-                    SnapSyncError::Network("expected an account range response".into()),
-                )
-            };
-
-            if msg.accounts.is_empty() {
-                // A server that cannot serve the root replies fully empty; an absence proof
-                // instead means the range really is past the last account.
-                if msg.proof.is_empty() {
+            let (decoded, exhausted) = match self.fetch_account_range(cursor).await? {
+                AccountRange::Unavailable => {
                     return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
                 }
-                self.checked(peer, self.verify_account_range(cursor, &[], &msg.proof))?;
-                return Ok(DownloadStateOutcome::Done)
-            }
-
-            let decoded = self.checked(peer, Self::decode_account_range(&msg.accounts, cursor))?;
-            self.checked(peer, self.verify_account_range(cursor, &decoded, &msg.proof))?;
+                AccountRange::PastTheEnd => return Ok(DownloadStateOutcome::Done),
+                AccountRange::Verified { accounts, exhausted } => (accounts, exhausted),
+            };
 
             let accounts = decoded
                 .iter()
@@ -135,15 +114,89 @@ where
 
             self.download_bytecodes(&code_hashes).await?;
 
-            // No boundary proof means the server exhausted the trie from a zero origin, which
-            // `verify_account_range` already checked against the root.
+            // An exhausted range was already checked against the root, so there is nothing after
+            // it.
             let last_hash = account_hashes.last().copied().expect("checked non-empty above");
-            if msg.proof.is_empty() {
+            if exhausted {
                 return Ok(DownloadStateOutcome::Done)
             }
             let Some(next) = next_hash(last_hash) else { return Ok(DownloadStateOutcome::Done) };
             cursor = next;
         }
+    }
+
+    /// Requests one account range, retrying with another peer when a response cannot be trusted.
+    ///
+    /// A peer that answers with the wrong message type, an unusable ordering or a proof that does
+    /// not reconstruct the root is reported and the request reissued. Giving up on the first bad
+    /// answer would let a single peer end the sync, so only exhausting the attempts is fatal.
+    async fn fetch_account_range(&mut self, cursor: B256) -> Result<AccountRange, SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            let response = match self
+                .client
+                .get_account_range(GetAccountRangeMessage {
+                    request_id,
+                    root_hash: self.root_hash,
+                    starting_hash: cursor,
+                    limit_hash: MAX_HASH,
+                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    // The request itself failed, so there is no peer response to hold against
+                    // anyone; the network layer already accounts for the failure.
+                    last_error = Some(SnapSyncError::Network(format!(
+                        "snap account range request failed: {err}"
+                    )));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::AccountRange(msg) = data else {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network("expected an account range response".into()),
+                ));
+                continue
+            };
+
+            if msg.accounts.is_empty() {
+                // A server that cannot serve the root replies fully empty; an absence proof
+                // instead means the range really is past the last account.
+                if msg.proof.is_empty() {
+                    return Ok(AccountRange::Unavailable)
+                }
+                match self.verify_account_range(cursor, &[], &msg.proof) {
+                    Ok(()) => return Ok(AccountRange::PastTheEnd),
+                    Err(err) => {
+                        last_error = Some(self.penalize(peer, err));
+                        continue
+                    }
+                }
+            }
+
+            let accounts = match Self::decode_account_range(&msg.accounts, cursor) {
+                Ok(accounts) => accounts,
+                Err(err) => {
+                    last_error = Some(self.penalize(peer, err));
+                    continue
+                }
+            };
+            if let Err(err) = self.verify_account_range(cursor, &accounts, &msg.proof) {
+                last_error = Some(self.penalize(peer, err));
+                continue
+            }
+
+            return Ok(AccountRange::Verified { accounts, exhausted: msg.proof.is_empty() })
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
     }
 
     /// Fetches and writes storage for one account batch.
@@ -160,46 +213,14 @@ where
             let end = (idx + STORAGE_BATCH_SIZE).min(account_hashes.len());
             let chunk = &account_hashes[idx..end];
 
-            let request_id = self.next_request_id();
-            let response = self
-                .client
-                .get_storage_ranges(GetStorageRangesMessage {
-                    request_id,
-                    root_hash: self.root_hash,
-                    account_hashes: chunk.to_vec(),
-                    starting_hash: B256::ZERO.into(),
-                    limit_hash: MAX_HASH.into(),
-                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-                })
-                .await
-                .map_err(|err| {
-                    SnapSyncError::Network(format!("snap storage range request failed: {err}"))
-                })?;
-
-            let (peer, data) = response.split();
-            let SnapResponse::StorageRanges(msg) = data else {
-                return self.reject(
-                    peer,
-                    SnapSyncError::Network("expected a storage ranges response".into()),
-                )
+            let Some(msg) = self.fetch_storage_ranges(chunk, B256::ZERO, storage_roots).await?
+            else {
+                // Servers answer with nothing at all when an account is missing at this root,
+                // rather than skipping it, so an empty response means the root is gone.
+                return Ok(true)
             };
 
-            if msg.slots.len() > chunk.len() {
-                return self.reject(
-                    peer,
-                    SnapSyncError::Network(
-                        "snap storage range returned more slot lists than requested".into(),
-                    ),
-                )
-            }
-
-            // Servers answer with nothing at all when an account is missing at this root, rather
-            // than skipping it and shifting the rest, so an empty response means the root is gone.
             let returned = msg.slots.len();
-            if returned == 0 {
-                return Ok(true)
-            }
-
             // A proof is only attached to the last returned account, and only when its range is
             // partial; everything before it is a complete zero-origin range.
             let truncated_index = (!msg.proof.is_empty()).then_some(returned - 1);
@@ -207,16 +228,12 @@ where
 
             for (i, slots) in msg.slots.iter().enumerate() {
                 let account_hash = chunk[i];
-                self.checked(peer, storage_roots.validate_slots(account_hash, B256::ZERO, slots))?;
 
                 let account_slots = if Some(i) == truncated_index {
-                    let decoded = self.checked(
-                        peer,
-                        storage_roots.verify_partial(account_hash, B256::ZERO, slots, &msg.proof),
-                    )?;
+                    let decoded = storage_roots.decode_slots(slots)?;
 
                     // An empty slot list with a proof is an absence proof for the whole storage
-                    // trie, which `verify_partial` already checked.
+                    // trie, which the fetch already checked.
                     match slots.last().and_then(|last| next_hash(last.hash)) {
                         Some(resume_from) => {
                             match self
@@ -230,7 +247,7 @@ where
                         None => decoded,
                     }
                 } else {
-                    self.checked(peer, storage_roots.verify_complete(account_hash, slots))?
+                    storage_roots.decode_slots(slots)?
                 };
 
                 storages.insert(account_hash, HashedStorage::from_iter(false, account_slots));
@@ -244,6 +261,74 @@ where
         Ok(false)
     }
 
+    /// Requests storage for `accounts`, retrying with another peer on an untrustworthy response.
+    ///
+    /// Returns `None` when the peer cannot serve the root. Every returned slot list has been
+    /// checked against its account's storage root, or against the boundary proof when the last
+    /// one was truncated.
+    async fn fetch_storage_ranges(
+        &mut self,
+        accounts: &[B256],
+        origin: B256,
+        storage_roots: &StorageRoots,
+    ) -> Result<Option<StorageRangesMessage>, SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            let response = match self
+                .client
+                .get_storage_ranges(GetStorageRangesMessage {
+                    request_id,
+                    root_hash: self.root_hash,
+                    account_hashes: accounts.to_vec(),
+                    starting_hash: origin.into(),
+                    limit_hash: MAX_HASH.into(),
+                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error = Some(SnapSyncError::Network(format!(
+                        "snap storage range request failed: {err}"
+                    )));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::StorageRanges(msg) = data else {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network("expected a storage ranges response".into()),
+                ));
+                continue
+            };
+
+            if msg.slots.len() > accounts.len() {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network(
+                        "snap storage range returned more slot lists than requested".into(),
+                    ),
+                ));
+                continue
+            }
+
+            if msg.slots.is_empty() {
+                return Ok(None)
+            }
+
+            match storage_roots.verify_response(accounts, origin, &msg) {
+                Ok(()) => return Ok(Some(msg)),
+                Err(err) => last_error = Some(self.penalize(peer, err)),
+            }
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
+    }
+
     /// Requests the remainder of one account's storage until it verifies against its storage root.
     async fn continue_storage(
         &mut self,
@@ -253,51 +338,19 @@ where
         mut collected: DecodedSlots,
     ) -> Result<StorageContinuation, SnapSyncError> {
         loop {
-            let request_id = self.next_request_id();
-            let response = self
-                .client
-                .get_storage_ranges(GetStorageRangesMessage {
-                    request_id,
-                    root_hash: self.root_hash,
-                    account_hashes: vec![account_hash],
-                    starting_hash: starting_hash.into(),
-                    limit_hash: MAX_HASH.into(),
-                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-                })
-                .await
-                .map_err(|err| {
-                    SnapSyncError::Network(format!("snap storage continuation failed: {err}"))
-                })?;
-
-            let (peer, data) = response.split();
-            let SnapResponse::StorageRanges(msg) = data else {
-                return self.reject(
-                    peer,
-                    SnapSyncError::Network("expected a storage ranges response".into()),
-                )
+            let Some(msg) =
+                self.fetch_storage_ranges(&[account_hash], starting_hash, storage_roots).await?
+            else {
+                return Ok(StorageContinuation::Stale)
             };
 
-            if msg.slots.len() > 1 {
-                return self.reject(
-                    peer,
-                    SnapSyncError::Network(
-                        "snap storage continuation returned multiple slot lists".into(),
-                    ),
-                )
-            }
-
-            let Some(slots) = msg.slots.first() else { return Ok(StorageContinuation::Stale) };
-
-            self.checked(peer, storage_roots.validate_slots(account_hash, starting_hash, slots))?;
-            collected.extend(self.checked(
-                peer,
-                storage_roots.verify_partial(account_hash, starting_hash, slots, &msg.proof),
-            )?);
+            let slots = msg.slots.first().expect("a non-empty response was verified");
+            collected.extend(storage_roots.decode_slots(slots)?);
 
             // Without a boundary proof the peer reached the end of this account's storage.
             let next = slots.last().filter(|_| !msg.proof.is_empty()).map(|last| last.hash);
             let Some(next) = next.and_then(next_hash) else {
-                self.checked(peer, storage_roots.verify_root(account_hash, &collected))?;
+                storage_roots.verify_root(account_hash, &collected)?;
                 return Ok(StorageContinuation::Complete(collected))
             };
 
@@ -310,26 +363,7 @@ where
         let hashes: Vec<B256> = code_hashes.iter().copied().collect();
 
         for chunk in hashes.chunks(BYTECODE_BATCH_SIZE) {
-            let request_id = self.next_request_id();
-            let response = self
-                .client
-                .get_byte_codes(GetByteCodesMessage {
-                    request_id,
-                    hashes: chunk.to_vec(),
-                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-                })
-                .await
-                .map_err(|err| {
-                    SnapSyncError::Network(format!("snap bytecode request failed: {err}"))
-                })?;
-
-            let (peer, data) = response.split();
-            let SnapResponse::ByteCodes(msg) = data else {
-                return self
-                    .reject(peer, SnapSyncError::Network("expected a byte codes response".into()))
-            };
-
-            let codes = self.checked(peer, Self::match_bytecodes(chunk, &msg.codes))?;
+            let codes = self.fetch_bytecodes(chunk).await?;
             if !codes.is_empty() {
                 self.writer.write_bytecodes(&codes)?;
             }
@@ -338,30 +372,64 @@ where
         Ok(())
     }
 
+    /// Requests bytecodes, retrying with another peer on an untrustworthy response.
+    async fn fetch_bytecodes(
+        &mut self,
+        hashes: &[B256],
+    ) -> Result<Vec<(B256, Bytes)>, SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            let response = match self
+                .client
+                .get_byte_codes(GetByteCodesMessage {
+                    request_id,
+                    hashes: hashes.to_vec(),
+                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error = Some(SnapSyncError::Network(format!(
+                        "snap bytecode request failed: {err}"
+                    )));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::ByteCodes(msg) = data else {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network("expected a byte codes response".into()),
+                ));
+                continue
+            };
+
+            match Self::match_bytecodes(hashes, &msg.codes) {
+                Ok(codes) => return Ok(codes),
+                Err(err) => last_error = Some(self.penalize(peer, err)),
+            }
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
+    }
+
     const fn next_request_id(&mut self) -> u64 {
         self.request_id += 1;
         self.request_id
     }
 
-    /// Reports the peer whose response failed validation, then surfaces the error.
+    /// Reports a peer whose response could not be used, and returns the error to retry against.
     ///
-    /// A peer that serves an unusable response is not merely unlucky: every check here is one a
-    /// correct server passes, so without penalizing, the same peer keeps being picked and the
-    /// download makes no progress.
-    fn checked<T>(
-        &self,
-        peer: PeerId,
-        result: Result<T, SnapSyncError>,
-    ) -> Result<T, SnapSyncError> {
-        if result.is_err() {
-            self.client.report_bad_message(peer);
-        }
-        result
-    }
-
-    /// Rejects a response outright, penalizing the peer that sent it.
-    fn reject<T>(&self, peer: PeerId, err: SnapSyncError) -> Result<T, SnapSyncError> {
-        self.checked(peer, Err(err))
+    /// Every check that leads here is one a correct server passes, so the peer is downgraded and
+    /// the request goes out again — the network layer then routes it elsewhere.
+    fn penalize(&self, peer: PeerId, err: SnapSyncError) -> SnapSyncError {
+        debug!(target: "engine::snap", ?peer, %err, "Rejected snap response");
+        self.client.report_bad_message(peer);
+        err
     }
 }
 
@@ -444,6 +512,22 @@ impl<C, F> StateDownloader<'_, C, F> {
     }
 }
 
+/// A verified account range, or the reason there is nothing to take from it.
+enum AccountRange {
+    /// The peer could not serve the requested root.
+    Unavailable,
+    /// The requested origin is past the last account, proven by an absence proof.
+    PastTheEnd,
+    /// Accounts verified against the root; `exhausted` when no boundary proof was attached,
+    /// meaning the range reached the end of the trie.
+    Verified {
+        /// Accounts in the order the peer served them.
+        accounts: Vec<(B256, TrieAccount)>,
+        /// Whether this range ran to the end of the trie.
+        exhausted: bool,
+    },
+}
+
 /// Result of a [`StateDownloader::run`] call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DownloadStateOutcome {
@@ -467,6 +551,36 @@ type DecodedSlots = Vec<(B256, U256)>;
 struct StorageRoots(B256Map<B256>);
 
 impl StorageRoots {
+    /// Checks every slot list in a storage-ranges response.
+    ///
+    /// All but the last are complete zero-origin ranges checked against their storage root; the
+    /// last is checked against the boundary proof when one is attached, because a truncated range
+    /// cannot rebuild the root on its own.
+    fn verify_response(
+        &self,
+        accounts: &[B256],
+        origin: B256,
+        msg: &StorageRangesMessage,
+    ) -> Result<(), SnapSyncError> {
+        let truncated_index = (!msg.proof.is_empty()).then_some(msg.slots.len() - 1);
+
+        for (i, slots) in msg.slots.iter().enumerate() {
+            let account_hash = *accounts.get(i).ok_or_else(|| {
+                SnapSyncError::Network("snap storage range returned an unrequested list".into())
+            })?;
+
+            self.validate_slots(account_hash, origin, slots)?;
+
+            if Some(i) == truncated_index {
+                self.verify_partial(account_hash, origin, slots, &msg.proof)?;
+            } else {
+                self.verify_complete(account_hash, slots)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Checks a partial storage range against its boundary proof and returns the decoded slots.
     fn verify_partial(
         &self,
