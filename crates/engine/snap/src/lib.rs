@@ -15,9 +15,11 @@
 //! reports the root as unavailable it advances the pivot and resumes from where it left off,
 //! without discarding the state already written.
 //!
-//! What this crate does *not* do yet: applying the block access lists collected between the final
-//! pivot and the chain head (EIP-8189's replacement for snap/1 healing), the final state-root
-//! check after that catch-up, and reorg recovery. Those build on top of [`sync_state`].
+//! [`catch_up_with_bals`] then carries that state from the pivot to the chain head by replaying
+//! block access lists, which is what EIP-8189 uses in place of snap/1's trie healing.
+//!
+//! What this crate does *not* do yet: the final state-root check after catch-up, reorg recovery,
+//! and the engine wiring that feeds [`SnapSyncEvent`]s in.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -29,17 +31,23 @@
 pub mod download;
 pub mod pivot;
 
+mod bal;
 mod proof;
 mod storage;
 
 pub use download::{download_state, DownloadStateOutcome};
 pub use pivot::{PivotTracker, SnapSyncEvent};
 
+use crate::{
+    bal::{decode_block_access_list, BlockStateDiff},
+    storage::SnapStateWriter,
+};
 use alloy_primitives::B256;
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_network_p2p::{headers::client::HeadersClient, snap::client::SnapClient};
 use reth_provider::{DatabaseProviderFactory, HeaderProvider};
 use reth_storage_api::{DBProvider, StateWriter};
+use tracing::debug;
 
 /// How many blocks behind the chain head the pivot is placed.
 ///
@@ -88,6 +96,44 @@ where
             }
         }
     }
+}
+
+/// Replays block access lists from `from_block` up to the head the tracker currently knows about,
+/// bringing the downloaded state forward without executing any transactions.
+///
+/// Returns the last block applied. The head moves while this runs, so the caller re-invokes with
+/// the returned block plus one until it has caught up enough to hand over to the engine; each call
+/// works against a head snapshot taken at entry so it always terminates.
+pub async fn catch_up_with_bals<C, F>(
+    client: &C,
+    factory: &F,
+    tracker: &mut PivotTracker,
+    from_block: u64,
+) -> Result<u64, SnapSyncError>
+where
+    C: SnapClient + HeadersClient + 'static,
+    F: DatabaseProviderFactory,
+    F::Provider: DBProvider + HeaderProvider<Header = C::Header>,
+    F::ProviderRW: DBProvider + StateWriter,
+    <F::Provider as DBProvider>::Tx: DbTx,
+    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+{
+    tracker.drain_events();
+
+    let writer = SnapStateWriter::new(factory);
+    let target = tracker.known_head();
+    let mut applied = from_block.saturating_sub(1);
+
+    for block_number in from_block..=target {
+        let bal = tracker.verified_bal(client, factory, block_number).await?;
+        let changes = decode_block_access_list(&bal, block_number)?;
+        BlockStateDiff::from_changes(&changes).apply(writer)?;
+        applied = block_number;
+
+        debug!(target: "engine::snap", block_number, target, "Applied block access list");
+    }
+
+    Ok(applied)
 }
 
 /// Errors that can occur during snap sync.

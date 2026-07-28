@@ -2,7 +2,10 @@
 
 use crate::SnapSyncError;
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
-use reth_db_api::{tables, transaction::DbTxMut};
+use reth_db_api::{
+    tables,
+    transaction::{DbTx, DbTxMut},
+};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
@@ -88,6 +91,23 @@ where
         provider.write_hashed_state(&hashed_state).map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
+    }
+}
+
+impl<F> SnapStateWriter<'_, F>
+where
+    F: DatabaseProviderFactory,
+    F::Provider: DBProvider,
+    <F::Provider as DBProvider>::Tx: DbTx,
+{
+    /// Reads a hashed account, used to merge partial block access list changes onto stored state.
+    pub(crate) fn read_account(
+        &self,
+        hashed_address: B256,
+    ) -> Result<Option<Account>, SnapSyncError> {
+        let provider = self.factory.database_provider_ro().map_err(db_err)?;
+        let account = provider.tx_ref().get::<tables::HashedAccounts>(hashed_address);
+        account.map_err(db_err)
     }
 }
 
