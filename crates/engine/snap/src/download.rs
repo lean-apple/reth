@@ -6,24 +6,26 @@
 //! how large the state is.
 
 use crate::{
-    proof::verify_range_proof, storage::SnapStateWriter, SnapSyncError, SNAP_RESPONSE_BYTES_LIMIT,
+    proof::verify_range_proof, reorg::StaleKeys, storage::SnapStateWriter, SnapSyncError,
+    SNAP_RESPONSE_BYTES_LIMIT,
 };
 use alloy_primitives::{
     keccak256,
     map::{B256Map, B256Set},
     Bytes, B256, KECCAK256_EMPTY, U256,
 };
+use alloy_trie::proof::verify_proof;
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::{
-    AccountData, GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage, StorageData,
-    StorageRangesMessage,
+    AccountData, AccountRangeMessage, GetAccountRangeMessage, GetByteCodesMessage,
+    GetStorageRangesMessage, StorageData, StorageRangesMessage,
 };
 use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
 use reth_network_peers::PeerId;
 use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
-use reth_trie::{root::storage_root, HashedPostState, HashedStorage, TrieAccount};
+use reth_trie::{root::storage_root, HashedPostState, HashedStorage, Nibbles, TrieAccount};
 use tracing::debug;
 
 /// Maximum number of account hashes per storage range request.
@@ -123,6 +125,165 @@ where
             let Some(next) = next_hash(last_hash) else { return Ok(DownloadStateOutcome::Done) };
             cursor = next;
         }
+    }
+
+    /// Re-reads keys an orphaned chain left behind, at the current root.
+    ///
+    /// Returns `false` when the root is no longer served, so the caller can advance the pivot and
+    /// try again. Snap has no request for a specific key, so each one is fetched as a range whose
+    /// origin and limit are that key, and checked with a single-key proof: a range proof would
+    /// assert completeness all the way to the end of the trie, which such a reply cannot support.
+    pub async fn refetch(&mut self, stale: &StaleKeys) -> Result<bool, SnapSyncError> {
+        // Accounts owning a stale slot are looked up too. Verifying a slot needs the account's
+        // storage root at *this* root, and the one recorded during the orphaned chain is no use.
+        let addresses: B256Set = stale.accounts().chain(stale.storage().keys().copied()).collect();
+
+        let mut accounts = B256Map::default();
+        let mut storages = B256Map::default();
+        let mut storage_roots = B256Map::default();
+
+        for address in addresses {
+            match self.fetch_account(address).await? {
+                AccountLookup::Unavailable => return Ok(false),
+                AccountLookup::Absent => {
+                    // The account is gone at this root, and its storage goes with it.
+                    accounts.insert(address, None);
+                    storages.insert(address, HashedStorage::new(true));
+                }
+                AccountLookup::Found(account) => {
+                    storage_roots.insert(address, account.storage_root);
+                    accounts.insert(address, Some(Account::from(account)));
+                }
+            }
+        }
+
+        for (address, slots) in stale.storage() {
+            // Storage of an account that no longer exists was already wiped above.
+            let Some(storage_root) = storage_roots.get(address).copied() else { continue };
+
+            let mut values = Vec::with_capacity(slots.len());
+            for slot in slots {
+                match self.fetch_slot(*address, storage_root, *slot).await? {
+                    SlotLookup::Unavailable => return Ok(false),
+                    // An absent slot reads as zero, which is how a cleared slot is stored.
+                    SlotLookup::Value(value) => values.push((*slot, value)),
+                }
+            }
+            storages.insert(*address, HashedStorage::from_iter(false, values));
+        }
+
+        debug!(
+            target: "engine::snap",
+            accounts = accounts.len(),
+            root_hash = %self.root_hash,
+            "Re-read state stranded by a reorg"
+        );
+        self.writer.write_state(HashedPostState { accounts, storages })?;
+
+        Ok(true)
+    }
+
+    /// Reads one account at the current root, retrying on an untrustworthy response.
+    async fn fetch_account(
+        &mut self,
+        hashed_address: B256,
+    ) -> Result<AccountLookup, SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            let response = match self
+                .client
+                .get_account_range(GetAccountRangeMessage {
+                    request_id,
+                    root_hash: self.root_hash,
+                    starting_hash: hashed_address,
+                    limit_hash: hashed_address,
+                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error =
+                        Some(SnapSyncError::Network(format!("snap account lookup failed: {err}")));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::AccountRange(msg) = data else {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network("expected an account range response".into()),
+                ));
+                continue
+            };
+
+            // No account and no proof at all means the peer cannot serve this root; an absence
+            // proof is a real answer that the account does not exist.
+            if msg.accounts.is_empty() && msg.proof.is_empty() {
+                return Ok(AccountLookup::Unavailable)
+            }
+
+            match Self::verify_single_account(self.root_hash, hashed_address, &msg) {
+                Ok(lookup) => return Ok(lookup),
+                Err(err) => last_error = Some(self.penalize(peer, err)),
+            }
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
+    }
+
+    /// Reads one storage slot at the current root, retrying on an untrustworthy response.
+    async fn fetch_slot(
+        &mut self,
+        hashed_address: B256,
+        storage_root: B256,
+        slot: B256,
+    ) -> Result<SlotLookup, SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            let response = match self
+                .client
+                .get_storage_ranges(GetStorageRangesMessage {
+                    request_id,
+                    root_hash: self.root_hash,
+                    account_hashes: vec![hashed_address],
+                    starting_hash: slot.into(),
+                    limit_hash: slot.into(),
+                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error =
+                        Some(SnapSyncError::Network(format!("snap slot lookup failed: {err}")));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::StorageRanges(msg) = data else {
+                last_error = Some(self.penalize(
+                    peer,
+                    SnapSyncError::Network("expected a storage ranges response".into()),
+                ));
+                continue
+            };
+
+            let Some(slots) = msg.slots.first() else { return Ok(SlotLookup::Unavailable) };
+
+            match Self::verify_single_slot(storage_root, slot, slots, &msg.proof) {
+                Ok(value) => return Ok(SlotLookup::Value(value)),
+                Err(err) => last_error = Some(self.penalize(peer, err)),
+            }
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
     }
 
     /// Requests one account range, retrying with another peer when a response cannot be trusted.
@@ -435,6 +596,75 @@ where
 
 // Verification and decoding of served responses, which need neither a client nor a database.
 impl<C, F> StateDownloader<'_, C, F> {
+    /// Checks a single-key account lookup against the root.
+    ///
+    /// A single-key reply proves one path, so it is checked with a key proof rather than the range
+    /// verifier: the latter asserts the response is complete through to the end of the trie, which
+    /// is not what a one-key reply claims.
+    fn verify_single_account(
+        root: B256,
+        hashed_address: B256,
+        msg: &AccountRangeMessage,
+    ) -> Result<AccountLookup, SnapSyncError> {
+        let account = match msg.accounts.as_slice() {
+            [] => None,
+            [data] if data.hash == hashed_address => Some(data.trie_account().map_err(|err| {
+                SnapSyncError::RlpDecode(format!("snap slim account body: {err}"))
+            })?),
+            _ => {
+                return Err(SnapSyncError::Network(
+                    "snap account lookup returned an account that was not requested".into(),
+                ))
+            }
+        };
+
+        verify_proof(
+            root,
+            Nibbles::unpack(hashed_address),
+            account.as_ref().map(alloy_rlp::encode),
+            &msg.proof,
+        )
+        .map_err(|err| {
+            SnapSyncError::Network(format!("invalid snap account lookup proof: {err}"))
+        })?;
+
+        Ok(account.map_or(AccountLookup::Absent, AccountLookup::Found))
+    }
+
+    /// Checks a single-key storage lookup against the account's storage root.
+    ///
+    /// An absent slot verifies as an absence proof and reads back as zero, which is how snap sync
+    /// records a slot the new chain cleared.
+    fn verify_single_slot(
+        storage_root: B256,
+        slot: B256,
+        slots: &[StorageData],
+        proof: &[Bytes],
+    ) -> Result<U256, SnapSyncError> {
+        let value = match slots {
+            [] => None,
+            [data] if data.hash == slot => Some(
+                data.value()
+                    .map_err(|err| SnapSyncError::RlpDecode(format!("snap storage slot: {err}")))?,
+            ),
+            _ => {
+                return Err(SnapSyncError::Network(
+                    "snap slot lookup returned a slot that was not requested".into(),
+                ))
+            }
+        };
+
+        verify_proof(
+            storage_root,
+            Nibbles::unpack(slot),
+            value.map(|value| alloy_rlp::encode_fixed_size(&value).to_vec()),
+            proof,
+        )
+        .map_err(|err| SnapSyncError::Network(format!("invalid snap slot lookup proof: {err}")))?;
+
+        Ok(value.unwrap_or_default())
+    }
+
     /// Checks a served account range against the pivot root.
     fn verify_account_range(
         &self,
@@ -510,6 +740,24 @@ impl<C, F> StateDownloader<'_, C, F> {
 
         Ok(matched)
     }
+}
+
+/// Outcome of looking up a single account at the current root.
+enum AccountLookup {
+    /// The peer could not serve the requested root.
+    Unavailable,
+    /// The account does not exist at this root, proven by an absence proof.
+    Absent,
+    /// The account as it stands at this root.
+    Found(TrieAccount),
+}
+
+/// Outcome of looking up a single storage slot at the current root.
+enum SlotLookup {
+    /// The peer could not serve the requested root.
+    Unavailable,
+    /// The slot's value, zero when it does not exist.
+    Value(U256),
 }
 
 /// A verified account range, or the reason there is nothing to take from it.
@@ -783,6 +1031,145 @@ mod tests {
         assert!(roots.validate_slots(account, b256(2), &[first.clone(), second.clone()]).is_ok());
         assert!(roots.validate_slots(account, b256(2), &[second.clone(), first]).is_err());
         assert!(roots.validate_slots(account, b256(4), &[second]).is_err());
+    }
+
+    /// Builds a trie over `leaves` and returns its root plus a proof for `target`.
+    fn key_proof(leaves: &[(B256, Vec<u8>)], target: B256) -> (B256, Vec<Bytes>) {
+        use alloy_trie::{proof::ProofRetainer, HashBuilder};
+
+        let mut builder = HashBuilder::default()
+            .with_proof_retainer(ProofRetainer::new(vec![Nibbles::unpack(target)]));
+        for (key, value) in leaves {
+            builder.add_leaf(Nibbles::unpack(*key), value);
+        }
+        let root = builder.root();
+        let proof =
+            builder.take_proof_nodes().into_nodes_sorted().into_iter().map(|(_, n)| n).collect();
+        (root, proof)
+    }
+
+    fn trie_account(nonce: u64) -> TrieAccount {
+        TrieAccount {
+            nonce,
+            balance: U256::from(1),
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: KECCAK256_EMPTY,
+        }
+    }
+
+    #[test]
+    fn single_account_lookup_accepts_a_present_account() {
+        let key = b256(2);
+        let account = trie_account(7);
+        let leaves =
+            vec![(b256(1), alloy_rlp::encode(trie_account(1))), (key, alloy_rlp::encode(account))];
+        let (root, proof) = key_proof(&leaves, key);
+        let msg = AccountRangeMessage {
+            request_id: 1,
+            accounts: vec![AccountData::from_trie_account(key, &account)],
+            proof,
+        };
+
+        let lookup = Downloader::verify_single_account(root, key, &msg).unwrap();
+
+        assert!(matches!(lookup, AccountLookup::Found(found) if found.nonce == 7));
+    }
+
+    #[test]
+    fn single_account_lookup_accepts_a_proven_absence() {
+        let missing = b256(2);
+        let leaves = vec![
+            (b256(1), alloy_rlp::encode(trie_account(1))),
+            (b256(3), alloy_rlp::encode(trie_account(3))),
+        ];
+        let (root, proof) = key_proof(&leaves, missing);
+        let msg = AccountRangeMessage { request_id: 1, accounts: vec![], proof };
+
+        let lookup = Downloader::verify_single_account(root, missing, &msg).unwrap();
+
+        // Absence is what tells a reorg recovery to delete an account the orphaned chain created.
+        assert!(matches!(lookup, AccountLookup::Absent));
+    }
+
+    #[test]
+    fn single_account_lookup_rejects_a_claimed_absence_of_a_present_account() {
+        let key = b256(2);
+        let leaves = vec![
+            (b256(1), alloy_rlp::encode(trie_account(1))),
+            (key, alloy_rlp::encode(trie_account(2))),
+        ];
+        let (root, proof) = key_proof(&leaves, key);
+        // The peer withholds the account it does have.
+        let msg = AccountRangeMessage { request_id: 1, accounts: vec![], proof };
+
+        assert!(Downloader::verify_single_account(root, key, &msg).is_err());
+    }
+
+    #[test]
+    fn single_account_lookup_rejects_a_different_account() {
+        let key = b256(2);
+        let account = trie_account(7);
+        let leaves = vec![(key, alloy_rlp::encode(account))];
+        let (root, proof) = key_proof(&leaves, key);
+        let msg = AccountRangeMessage {
+            request_id: 1,
+            accounts: vec![AccountData::from_trie_account(b256(9), &account)],
+            proof,
+        };
+
+        assert!(Downloader::verify_single_account(root, key, &msg).is_err());
+    }
+
+    /// Spreads keys the way hashing does, so the trie has hashed child nodes to walk rather than
+    /// the inline ones that near-identical keys collapse into.
+    fn spread(index: u64) -> B256 {
+        keccak256(index.to_be_bytes())
+    }
+
+    /// Storage leaves for `(key, value)` pairs, sorted as the trie builder requires.
+    fn slot_leaves(slots: &[(u64, u64)]) -> Vec<(B256, Vec<u8>)> {
+        let mut leaves: Vec<_> = slots
+            .iter()
+            .map(|(key, value)| {
+                (spread(*key), alloy_rlp::encode_fixed_size(&U256::from(*value)).to_vec())
+            })
+            .collect();
+        leaves.sort_by_key(|(key, _)| *key);
+        leaves
+    }
+
+    #[test]
+    fn single_slot_lookup_reads_an_absent_slot_as_zero() {
+        let missing = spread(2);
+        let leaves = slot_leaves(&[(1, 1), (3, 3)]);
+        let (root, proof) = key_proof(&leaves, missing);
+
+        let value = Downloader::verify_single_slot(root, missing, &[], &proof).unwrap();
+
+        // A cleared slot is stored as zero, so absence and zero have to agree.
+        assert_eq!(value, U256::ZERO);
+    }
+
+    #[test]
+    fn single_slot_lookup_accepts_a_present_slot() {
+        let key = spread(2);
+        let leaves = slot_leaves(&[(1, 1), (2, 42), (3, 3)]);
+        let (root, proof) = key_proof(&leaves, key);
+        let served = StorageData::from_value(key, U256::from(42));
+
+        let value = Downloader::verify_single_slot(root, key, &[served], &proof).unwrap();
+
+        assert_eq!(value, U256::from(42));
+    }
+
+    #[test]
+    fn single_slot_lookup_rejects_a_forged_value() {
+        let key = spread(2);
+        let leaves = slot_leaves(&[(1, 1), (2, 42), (3, 3)]);
+        let (root, proof) = key_proof(&leaves, key);
+        let forged = StorageData::from_value(key, U256::from(43));
+
+        assert!(Downloader::verify_single_slot(root, key, &[forged], &proof).is_err());
     }
 
     #[test]

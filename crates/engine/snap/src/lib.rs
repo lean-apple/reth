@@ -26,9 +26,11 @@
 //! replaced, so an orphaned block cannot be rewound; instead the keys each applied block wrote are
 //! remembered, and a reorg leaves behind exactly those the new chain does not rewrite.
 //!
-//! What this crate does *not* do yet: re-reading [`StaleKeys`] from peers after a reorg, and the
-//! engine wiring that feeds [`SnapSyncEvent`]s in. Snap sync stays opt-in; it is not the default
-//! sync path.
+//! [`recover_from_reorg`] then re-reads those keys with single-key snap requests, so a reorg costs
+//! a handful of lookups rather than a restart.
+//!
+//! What this crate does *not* do yet: the engine wiring that feeds [`SnapSyncEvent`]s in. Snap
+//! sync stays opt-in; it is not the default sync path.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -56,7 +58,7 @@ use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_network_p2p::{headers::client::HeadersClient, snap::client::SnapClient};
 use reth_provider::{DatabaseProviderFactory, HeaderProvider};
 use reth_storage_api::{DBProvider, StateWriter};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// How many blocks behind the chain head the pivot is placed.
 ///
@@ -197,6 +199,38 @@ pub enum CatchUpOutcome {
         /// Last block whose applied state is still canonical.
         fork_block: u64,
     },
+}
+
+/// Re-reads the keys a reorg stranded, so the state matches the surviving chain again.
+///
+/// Returns `false` when no peer serves the pivot root any more, leaving the keys marked stale for
+/// a retry once the pivot has advanced. On success nothing is left over and the state-root check
+/// can proceed.
+pub async fn recover_from_reorg<C, F>(
+    client: &C,
+    factory: &F,
+    tracker: &PivotTracker,
+    chain: &mut AppliedChain,
+) -> Result<bool, SnapSyncError>
+where
+    C: SnapClient + 'static,
+    F: DatabaseProviderFactory,
+    F::ProviderRW: DBProvider + StateWriter,
+    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+{
+    if chain.stale_keys().is_empty() {
+        return Ok(true)
+    }
+
+    let mut downloader = StateDownloader::new(client, factory, tracker.pivot_root());
+    if !downloader.refetch(chain.stale_keys()).await? {
+        return Ok(false)
+    }
+
+    let recovered = chain.clear_stale();
+    info!(target: "engine::snap", recovered, "Re-read state stranded by a reorg");
+
+    Ok(true)
 }
 
 /// Errors that can occur during snap sync.

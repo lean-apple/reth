@@ -72,6 +72,14 @@ impl AppliedChain {
         (applied.hash != parent_hash).then_some(parent_number)
     }
 
+    /// Clears the stale set once its keys have been re-read, returning how many there were.
+    pub fn clear_stale(&mut self) -> usize {
+        let count = self.stale.accounts.len() +
+            self.stale.storage.values().map(B256Set::len).sum::<usize>();
+        self.stale = StaleKeys::default();
+        count
+    }
+
     /// Drops every applied block from `from_block` upward, marking the keys they wrote as stale.
     ///
     /// Catch-up then re-applies the new chain, and [`record`](Self::record) clears whatever it

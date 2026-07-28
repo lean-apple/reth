@@ -29,6 +29,7 @@ alloy-eip7928 = { workspace = true, features = ["rlp"] }
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
+alloy-trie.workspace = true
 
 # async
 tokio = { workspace = true, features = ["sync"] }
@@ -38,7 +39,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-alloy-trie.workspace = true
 reth-db-api = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
