@@ -20,6 +20,7 @@ reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-storage-api.workspace = true
 reth-trie.workspace = true
+reth-trie-db.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -37,6 +38,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 alloy-trie.workspace = true
+reth-db-api = { workspace = true, features = ["test-utils"] }
+reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
 
 [features]
@@ -47,4 +50,5 @@ test-utils = [
     "reth-primitives-traits/test-utils",
     "reth-provider/test-utils",
     "reth-trie/test-utils",
+    "reth-trie-db/test-utils",
 ]

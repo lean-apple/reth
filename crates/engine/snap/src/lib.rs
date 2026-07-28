@@ -18,8 +18,12 @@
 //! [`catch_up_with_bals`] then carries that state from the pivot to the chain head by replaying
 //! block access lists, which is what EIP-8189 uses in place of snap/1's trie healing.
 //!
-//! What this crate does *not* do yet: the final state-root check after catch-up, reorg recovery,
-//! and the engine wiring that feeds [`SnapSyncEvent`]s in.
+//! [`SnapStateWriter::finalize_sync`] closes the sync: it rebuilds the state trie over everything
+//! that was assembled, checks its root against the block header, and persists the trie tables from
+//! the same pass.
+//!
+//! What this crate does *not* do yet: reorg recovery, and the engine wiring that feeds
+//! [`SnapSyncEvent`]s in.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -30,18 +34,16 @@
 
 pub mod download;
 pub mod pivot;
+pub mod storage;
 
 mod bal;
 mod proof;
-mod storage;
 
 pub use download::{DownloadStateOutcome, StateDownloader};
 pub use pivot::{PivotTracker, SnapSyncEvent};
+pub use storage::SnapStateWriter;
 
-use crate::{
-    bal::{decode_block_access_list, BlockStateDiff},
-    storage::SnapStateWriter,
-};
+use crate::bal::{decode_block_access_list, BlockStateDiff};
 use alloy_primitives::B256;
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_network_p2p::{headers::client::HeadersClient, snap::client::SnapClient};
@@ -163,6 +165,16 @@ pub enum SnapSyncError {
         block: u64,
         /// Commitment from the block header.
         expected: B256,
+    },
+    /// The rebuilt state trie does not match the block's state root.
+    #[error("state root mismatch at block {block}: expected {expected}, rebuilt {computed}")]
+    StateRootMismatch {
+        /// Block the state should correspond to.
+        block: u64,
+        /// State root from the block header.
+        expected: B256,
+        /// Root rebuilt from the downloaded state.
+        computed: B256,
     },
     /// A header required to resolve a pivot or a BAL commitment could not be found.
     #[error("header not found for block {0}")]

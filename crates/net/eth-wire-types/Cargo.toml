@@ -69,6 +69,7 @@ std = [
     "serde?/std",
     "thiserror/std",
     "reth-chainspec/std",
+    "alloy-trie/std",
 ]
 arbitrary = [
     "reth-ethereum-primitives/arbitrary",
@@ -83,6 +84,7 @@ arbitrary = [
     "alloy-eips/arbitrary",
     "alloy-primitives/arbitrary",
     "reth-primitives-traits/arbitrary",
+    "alloy-trie/arbitrary",
 ]
 serde = [
     "dep:serde",
@@ -96,4 +98,5 @@ serde = [
     "reth-ethereum-primitives/serde",
     "alloy-hardforks/serde",
     "alloy-eip7928?/serde",
+    "alloy-trie/serde",
 ]
