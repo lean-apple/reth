@@ -82,9 +82,8 @@ impl AppliedChain {
 
     /// Drops every applied block from `from_block` upward, marking the keys they wrote as stale.
     ///
-    /// Catch-up then re-applies the new chain, and [`record`](Self::record) clears whatever it
-    /// rewrites. What remains in [`stale_keys`](Self::stale_keys) is state the new chain never
-    /// corrects.
+    /// Catch-up then re-applies the new chain, which clears whatever it rewrites. What remains in
+    /// [`stale_keys`](Self::stale_keys) is state the new chain never corrects.
     pub fn orphan_from(&mut self, from_block: u64) {
         for block in self.blocks.split_off(&from_block).into_values() {
             self.stale.accounts.extend(block.accounts);

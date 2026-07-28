@@ -255,6 +255,11 @@ Networking:
 
           When enabled, peers discovered without a confirmed fork ID are not added to the peer set until their fork ID is verified via EIP-868 ENR request. This filters out peers from other networks that pollute the discovery table.
 
+      --snap
+          Advertise the `snap/2` capability (EIP-8189).
+
+          Lets peers request account, storage, bytecode and block access list data from this node. Off by default: snap is not reth's sync path, and advertising it commits this node to answering those requests.
+
 Datadir:
       --datadir <DATA_DIR>
           The path to the data dir for all reth files and subdirectories.
