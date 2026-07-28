@@ -10,20 +10,21 @@
 
 use crate::{storage::SnapStateWriter, SnapSyncError};
 use alloy_eip7928::AccountChanges;
-use alloy_primitives::{keccak256, Bytes, B256, KECCAK256_EMPTY, U256};
+use alloy_primitives::{keccak256, map::B256Map, Bytes, B256, KECCAK256_EMPTY, U256};
 use alloy_rlp::Decodable;
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
+use reth_trie::{HashedPostState, HashedStorage};
 
 /// The state changes one block's access list commits to, in hashed-key form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BlockStateDiff {
     /// Per-account field changes, keyed by `keccak256(address)`.
-    accounts: Vec<AccountDiff>,
-    /// `(hashed address, hashed slot, post-block value)` triples.
-    storage: Vec<(B256, B256, U256)>,
+    accounts: Vec<BalAccountDiff>,
+    /// Post-block slot values, keyed by hashed address then hashed slot.
+    storage: B256Map<B256Map<U256>>,
     /// `(code hash, code)` pairs for contracts deployed in this block.
     bytecodes: Vec<(B256, Bytes)>,
 }
@@ -65,17 +66,21 @@ impl BlockStateDiff {
                 if let Some(change) =
                     slot.changes.iter().max_by_key(|change| change.block_access_index)
                 {
-                    diff.storage.push((
-                        hashed_address,
-                        keccak256(B256::from(slot.slot)),
-                        change.new_value,
-                    ));
+                    diff.storage
+                        .entry(hashed_address)
+                        .or_default()
+                        .insert(keccak256(B256::from(slot.slot)), change.new_value);
                 }
             }
 
             // Accounts that were only read appear in the list with no changes at all.
             if balance.is_some() || nonce.is_some() || bytecode_hash.is_some() {
-                diff.accounts.push(AccountDiff { hashed_address, balance, nonce, bytecode_hash });
+                diff.accounts.push(BalAccountDiff {
+                    hashed_address,
+                    balance,
+                    nonce,
+                    bytecode_hash,
+                });
             }
         }
 
@@ -91,18 +96,21 @@ impl BlockStateDiff {
         <F::Provider as DBProvider>::Tx: DbTx,
         <F::ProviderRW as DBProvider>::Tx: DbTxMut,
     {
-        let mut accounts = Vec::with_capacity(self.accounts.len());
+        let mut accounts = B256Map::default();
         for diff in &self.accounts {
             let existing = writer.read_account(diff.hashed_address)?;
-            accounts.push((diff.hashed_address, diff.merge_onto(existing.as_ref())));
+            accounts.insert(diff.hashed_address, Some(diff.merge_onto(existing.as_ref())));
         }
 
-        if !accounts.is_empty() {
-            writer.write_accounts(&accounts)?;
-        }
-        if !self.storage.is_empty() {
-            writer.write_storages(&self.storage)?;
-        }
+        let storages = self
+            .storage
+            .iter()
+            .map(|(address, slots)| {
+                (*address, HashedStorage::from_iter(false, slots.iter().map(|(k, v)| (*k, *v))))
+            })
+            .collect();
+
+        writer.write_state(HashedPostState { accounts, storages })?;
         if !self.bytecodes.is_empty() {
             writer.write_bytecodes(&self.bytecodes)?;
         }
@@ -123,7 +131,7 @@ pub(crate) fn decode_block_access_list(
 
 /// One account's field changes within a block.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AccountDiff {
+struct BalAccountDiff {
     /// `keccak256(address)`.
     hashed_address: B256,
     /// Post-block balance, when the block changed it.
@@ -134,7 +142,7 @@ struct AccountDiff {
     bytecode_hash: Option<Option<B256>>,
 }
 
-impl AccountDiff {
+impl BalAccountDiff {
     /// Applies the changed fields on top of the account currently in the database.
     ///
     /// A field the block did not touch keeps its stored value, which is why this cannot be a plain
@@ -200,10 +208,7 @@ mod tests {
 
         let diff = BlockStateDiff::from_changes(&[changes]);
 
-        assert_eq!(
-            diff.storage,
-            vec![(keccak256(address), keccak256(B256::from(slot)), U256::from(44))]
-        );
+        assert_eq!(diff.storage[&keccak256(address)][&keccak256(B256::from(slot))], U256::from(44));
     }
 
     #[test]
@@ -234,7 +239,7 @@ mod tests {
     fn untouched_fields_keep_their_stored_values() {
         let existing =
             Account { nonce: 4, balance: U256::from(9), bytecode_hash: Some(B256::repeat_byte(1)) };
-        let diff = AccountDiff {
+        let diff = BalAccountDiff {
             hashed_address: B256::ZERO,
             balance: Some(U256::from(99)),
             nonce: None,
@@ -250,7 +255,7 @@ mod tests {
 
     #[test]
     fn new_accounts_default_their_untouched_fields() {
-        let diff = AccountDiff {
+        let diff = BalAccountDiff {
             hashed_address: B256::ZERO,
             balance: Some(U256::from(1)),
             nonce: None,
@@ -267,7 +272,7 @@ mod tests {
     fn cleared_code_is_stored_as_no_code() {
         let existing =
             Account { nonce: 1, balance: U256::ZERO, bytecode_hash: Some(B256::repeat_byte(2)) };
-        let diff = AccountDiff {
+        let diff = BalAccountDiff {
             hashed_address: B256::ZERO,
             balance: None,
             nonce: None,
@@ -279,7 +284,7 @@ mod tests {
 
     #[test]
     fn empty_code_hash_normalises_to_no_code() {
-        let diff = AccountDiff {
+        let diff = BalAccountDiff {
             hashed_address: B256::ZERO,
             balance: None,
             nonce: None,

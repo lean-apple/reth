@@ -24,6 +24,7 @@ alloy-eip7928 = { workspace = true, features = ["rlp"], optional = true }
 alloy-eips.workspace = true
 alloy-primitives = { workspace = true, features = ["map"] }
 alloy-rlp = { workspace = true, features = ["derive"] }
+alloy-trie.workspace = true
 alloy-consensus.workspace = true
 
 bytes.workspace = true

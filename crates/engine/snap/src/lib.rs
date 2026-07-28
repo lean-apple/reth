@@ -8,7 +8,7 @@
 //!
 //! * [`PivotTracker`] — tracks the block whose state is being downloaded, and advances it when the
 //!   chain moves far enough ahead that serving peers can no longer answer for the old root.
-//! * [`download_state`] — streams accounts, storage and bytecodes at a given root, verifying range
+//! * [`StateDownloader`] — streams accounts, storage and bytecodes at a given root, verifying range
 //!   proofs and writing each batch to the database before requesting the next one.
 //!
 //! [`sync_state`] ties the two together: it downloads at the current pivot, and whenever a peer
@@ -35,7 +35,7 @@ mod bal;
 mod proof;
 mod storage;
 
-pub use download::{download_state, DownloadStateOutcome};
+pub use download::{DownloadStateOutcome, StateDownloader};
 pub use pivot::{PivotTracker, SnapSyncEvent};
 
 use crate::{
@@ -73,7 +73,7 @@ pub async fn sync_state<C, F>(
 ) -> Result<(u64, B256), SnapSyncError>
 where
     C: SnapClient + HeadersClient + 'static,
-    F: DatabaseProviderFactory + Clone + Send + Sync + 'static,
+    F: DatabaseProviderFactory,
     F::Provider: DBProvider + HeaderProvider<Header = C::Header>,
     F::ProviderRW: DBProvider + StateWriter,
     <F::Provider as DBProvider>::Tx: DbTx,
@@ -83,7 +83,7 @@ where
 
     loop {
         let root = tracker.pivot_root();
-        match download_state(client, factory, root, resume_from).await? {
+        match StateDownloader::new(client, factory, root).run(resume_from).await? {
             DownloadStateOutcome::Done => return Ok((tracker.pivot_block(), root)),
             DownloadStateOutcome::Stale { resume_from: next } => {
                 resume_from = next;

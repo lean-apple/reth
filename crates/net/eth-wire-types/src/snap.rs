@@ -7,8 +7,9 @@
 
 use crate::BlockAccessLists;
 use alloc::vec::Vec;
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Bytes, B256, KECCAK256_EMPTY, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable, RlpDecodable, RlpEncodable};
+use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH};
 use reth_codecs_derive::add_arbitrary_tests;
 
 /// Supported SNAP protocol versions.
@@ -113,6 +114,69 @@ pub struct AccountData {
     pub body: Bytes,
 }
 
+impl AccountData {
+    /// Encodes `account` in snap/2's slim format.
+    pub fn from_trie_account(hash: B256, account: &TrieAccount) -> Self {
+        let body = alloy_rlp::encode(SlimAccountBody {
+            nonce: account.nonce,
+            balance: account.balance,
+            storage_root: SlimAccountBody::shorten(account.storage_root, EMPTY_ROOT_HASH),
+            code_hash: SlimAccountBody::shorten(account.code_hash, KECCAK256_EMPTY),
+        });
+        Self { hash, body: body.into() }
+    }
+
+    /// Decodes the slim body into the account the trie leaf commits to.
+    ///
+    /// Range proofs are verified against the full encoding, so the omitted storage root and code
+    /// hash are restored to their defaults here.
+    pub fn trie_account(&self) -> alloy_rlp::Result<TrieAccount> {
+        let slim = SlimAccountBody::decode(&mut self.body.as_ref())?;
+
+        Ok(TrieAccount {
+            nonce: slim.nonce,
+            balance: slim.balance,
+            storage_root: SlimAccountBody::restore(&slim.storage_root, EMPTY_ROOT_HASH)?,
+            code_hash: SlimAccountBody::restore(&slim.code_hash, KECCAK256_EMPTY)?,
+        })
+    }
+}
+
+/// Like the consensus trie account, but the code hash and storage root are empty byte strings
+/// rather than [`KECCAK256_EMPTY`]/[`EMPTY_ROOT_HASH`] when the account has no code/storage, to
+/// avoid transferring the same 32 bytes for every EOA.
+#[derive(RlpEncodable, RlpDecodable)]
+struct SlimAccountBody {
+    /// The account's nonce.
+    nonce: u64,
+    /// The account's balance.
+    balance: U256,
+    /// Empty when the account has no storage.
+    storage_root: Bytes,
+    /// Empty when the account has no code.
+    code_hash: Bytes,
+}
+
+impl SlimAccountBody {
+    /// Drops a field that holds its empty default, which is what makes the encoding slim.
+    fn shorten(value: B256, empty: B256) -> Bytes {
+        if value == empty {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(value.as_slice())
+        }
+    }
+
+    /// Restores a dropped field to `empty`, rejecting any length the encoding never produces.
+    fn restore(value: &Bytes, empty: B256) -> alloy_rlp::Result<B256> {
+        match value.len() {
+            0 => Ok(empty),
+            32 => Ok(B256::from_slice(value)),
+            _ => Err(alloy_rlp::Error::UnexpectedLength),
+        }
+    }
+}
+
 /// Response containing a number of consecutive accounts and the Merkle proofs for the entire range.
 // http://github.com/ethereum/devp2p/blob/master/caps/snap.md#accountrange-0x01
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
@@ -208,6 +272,18 @@ pub struct StorageData {
     pub hash: B256,
     /// Data content of the slot
     pub data: Bytes,
+}
+
+impl StorageData {
+    /// Encodes a slot value as the storage trie leaf commits to it.
+    pub fn from_value(hash: B256, value: U256) -> Self {
+        Self { hash, data: alloy_rlp::encode(value).into() }
+    }
+
+    /// Decodes the slot value.
+    pub fn value(&self) -> alloy_rlp::Result<U256> {
+        U256::decode(&mut self.data.as_ref())
+    }
 }
 
 /// Response containing a number of consecutive storage slots for the requested account
