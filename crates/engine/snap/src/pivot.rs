@@ -83,6 +83,11 @@ impl PivotTracker {
         self.known_head_hash
     }
 
+    /// Returns the hash and parent hash the engine reported for a buffered block.
+    pub fn block_hashes(&self, block_number: u64) -> Option<(B256, B256)> {
+        self.buffered_blocks.get(&block_number).map(|block| (block.hash, block.parent_hash))
+    }
+
     /// Consumes every event queued by the engine without blocking.
     pub fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
@@ -159,8 +164,9 @@ impl PivotTracker {
 
     fn apply_event(&mut self, event: SnapSyncEvent) {
         match event {
-            SnapSyncEvent::NewBlock { number, hash, state_root, bal } => {
-                self.buffered_blocks.insert(number, BufferedBlock { state_root, bal });
+            SnapSyncEvent::NewBlock { number, hash, parent_hash, state_root, bal } => {
+                self.buffered_blocks
+                    .insert(number, BufferedBlock { hash, parent_hash, state_root, bal });
                 if number > self.known_head {
                     self.known_head = number;
                     self.known_head_hash = hash;
@@ -301,6 +307,8 @@ pub enum SnapSyncEvent {
         number: u64,
         /// Block hash.
         hash: B256,
+        /// Hash of the parent block, used to detect a reorg under catch-up.
+        parent_hash: B256,
         /// State root from the block header.
         state_root: B256,
         /// RLP-encoded block access list, when the payload carried one.
@@ -318,6 +326,10 @@ pub enum SnapSyncEvent {
 /// A block the engine reported that has not been applied yet.
 #[derive(Debug, Clone)]
 struct BufferedBlock {
+    /// Block hash.
+    hash: B256,
+    /// Hash of the parent block.
+    parent_hash: B256,
     /// State root from the block header.
     state_root: B256,
     /// RLP-encoded block access list, when the payload carried one.
@@ -357,6 +369,7 @@ mod tests {
         tx.send(SnapSyncEvent::NewBlock {
             number: 42,
             hash: B256::repeat_byte(1),
+            parent_hash: B256::repeat_byte(2),
             state_root,
             bal: None,
         })

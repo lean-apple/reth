@@ -22,8 +22,13 @@
 //! that was assembled, checks its root against the block header, and persists the trie tables from
 //! the same pass.
 //!
-//! What this crate does *not* do yet: reorg recovery, and the engine wiring that feeds
-//! [`SnapSyncEvent`]s in.
+//! [`AppliedChain`] covers reorgs during catch-up. Applying a BAL does not record what it
+//! replaced, so an orphaned block cannot be rewound; instead the keys each applied block wrote are
+//! remembered, and a reorg leaves behind exactly those the new chain does not rewrite.
+//!
+//! What this crate does *not* do yet: re-reading [`StaleKeys`] from peers after a reorg, and the
+//! engine wiring that feeds [`SnapSyncEvent`]s in. Snap sync stays opt-in; it is not the default
+//! sync path.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/paradigmxyz/reth/main/assets/reth-docs.png",
@@ -34,6 +39,7 @@
 
 pub mod download;
 pub mod pivot;
+pub mod reorg;
 pub mod storage;
 
 mod bal;
@@ -41,6 +47,7 @@ mod proof;
 
 pub use download::{DownloadStateOutcome, StateDownloader};
 pub use pivot::{PivotTracker, SnapSyncEvent};
+pub use reorg::{AppliedChain, StaleKeys};
 pub use storage::SnapStateWriter;
 
 use crate::bal::{decode_block_access_list, BlockStateDiff};
@@ -110,8 +117,9 @@ pub async fn catch_up_with_bals<C, F>(
     client: &C,
     factory: &F,
     tracker: &mut PivotTracker,
+    chain: &mut AppliedChain,
     from_block: u64,
-) -> Result<u64, SnapSyncError>
+) -> Result<CatchUpOutcome, SnapSyncError>
 where
     C: SnapClient + HeadersClient + 'static,
     F: DatabaseProviderFactory,
@@ -127,15 +135,68 @@ where
     let mut applied = from_block.saturating_sub(1);
 
     for block_number in from_block..=target {
-        let bal = tracker.verified_bal(client, factory, block_number).await?;
-        let changes = decode_block_access_list(&bal, block_number)?;
-        BlockStateDiff::from_changes(&changes).apply(writer)?;
-        applied = block_number;
+        // A block whose parent is not what was applied below it means the chain moved while
+        // catch-up was running. Applying it would stack new state on top of orphaned state.
+        if let Some((hash, parent_hash)) = tracker.block_hashes(block_number) {
+            if let Some(fork_block) = chain.divergence(block_number, parent_hash) {
+                chain.orphan_from(fork_block + 1);
 
+                debug!(target: "engine::snap", block_number, fork_block, "Reorg during catch-up");
+                return Ok(CatchUpOutcome::Reorged { fork_block })
+            }
+
+            let diff = apply_bal(client, factory, tracker, writer, block_number).await?;
+            chain.record(block_number, hash, &diff);
+        } else {
+            // Without engine-reported hashes there is nothing to compare, so the block is applied
+            // but not recorded; a later reorg below it cannot be detected from this height.
+            apply_bal(client, factory, tracker, writer, block_number).await?;
+        }
+
+        applied = block_number;
         debug!(target: "engine::snap", block_number, target, "Applied block access list");
     }
 
-    Ok(applied)
+    Ok(CatchUpOutcome::Applied(applied))
+}
+
+/// Fetches, verifies and applies one block's access list, returning what it wrote.
+async fn apply_bal<C, F>(
+    client: &C,
+    factory: &F,
+    tracker: &PivotTracker,
+    writer: SnapStateWriter<'_, F>,
+    block_number: u64,
+) -> Result<BlockStateDiff, SnapSyncError>
+where
+    C: SnapClient + HeadersClient + 'static,
+    F: DatabaseProviderFactory,
+    F::Provider: DBProvider + HeaderProvider<Header = C::Header>,
+    F::ProviderRW: DBProvider + StateWriter,
+    <F::Provider as DBProvider>::Tx: DbTx,
+    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+{
+    let bal = tracker.verified_bal(client, factory, block_number).await?;
+    let changes = decode_block_access_list(&bal, block_number)?;
+    let diff = BlockStateDiff::from_changes(&changes);
+    diff.apply(writer)?;
+    Ok(diff)
+}
+
+/// Result of a [`catch_up_with_bals`] pass.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CatchUpOutcome {
+    /// Access lists were applied through this block.
+    Applied(u64),
+    /// The chain reorged mid-catch-up and nothing above `fork_block` was applied.
+    ///
+    /// Catch-up resumes from `fork_block + 1` along the new chain. Keys the new chain does not
+    /// rewrite stay in [`AppliedChain::stale_keys`] and must be re-read from peers, because the
+    /// values written for them came from a chain that no longer exists.
+    Reorged {
+        /// Last block whose applied state is still canonical.
+        fork_block: u64,
+    },
 }
 
 /// Errors that can occur during snap sync.

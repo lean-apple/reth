@@ -87,6 +87,16 @@ impl BlockStateDiff {
         diff
     }
 
+    /// Hashed addresses whose account fields this block wrote.
+    pub(crate) fn changed_accounts(&self) -> impl Iterator<Item = B256> + '_ {
+        self.accounts.iter().map(|diff| diff.hashed_address)
+    }
+
+    /// Hashed slots this block wrote, keyed by hashed address.
+    pub(crate) const fn changed_storage(&self) -> &B256Map<B256Map<U256>> {
+        &self.storage
+    }
+
     /// Merges this diff onto the state already in the database and writes the result.
     pub(crate) fn apply<F>(&self, writer: SnapStateWriter<'_, F>) -> Result<(), SnapSyncError>
     where
