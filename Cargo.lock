@@ -8426,6 +8426,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-engine-snap"
+version = "2.4.1"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eip7928",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "reth-db-api",
+ "reth-eth-wire-types",
+ "reth-network-p2p",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "reth-trie",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "reth-engine-tree"
 version = "2.4.1"
 dependencies = [
