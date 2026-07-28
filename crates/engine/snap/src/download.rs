@@ -7,7 +7,7 @@
 
 use crate::{
     proof::verify_range_proof,
-    storage::{increment_b256, write_bytecodes, write_hashed_accounts, write_hashed_storages},
+    storage::{increment_b256, SnapStateWriter},
     SnapSyncError, SNAP_RESPONSE_BYTES_LIMIT,
 };
 use alloy_primitives::{keccak256, Bytes, B256, KECCAK256_EMPTY, U256};
@@ -64,6 +64,7 @@ where
     F::ProviderRW: DBProvider + StateWriter,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
+    let writer = SnapStateWriter::new(factory);
     let mut request_id: u64 = 0;
     let mut cursor = starting_hash;
 
@@ -120,11 +121,11 @@ where
             %root_hash,
             "Downloaded account range"
         );
-        write_hashed_accounts(factory, &accounts)?;
+        writer.write_accounts(&accounts)?;
 
         if fetch_storage_for_accounts(
             client,
-            factory,
+            writer,
             root_hash,
             &account_hashes,
             &storage_roots,
@@ -135,7 +136,7 @@ where
             return Ok(DownloadStateOutcome::Stale { resume_from: batch_start })
         }
 
-        fetch_bytecodes(client, factory, &code_hashes, &mut request_id).await?;
+        fetch_bytecodes(client, writer, &code_hashes, &mut request_id).await?;
 
         // No boundary proof means the server exhausted the trie from a zero origin, which
         // `verify_account_range_proof` already checked against the root.
@@ -153,7 +154,7 @@ where
 /// batch was written.
 async fn fetch_storage_for_accounts<C, F>(
     client: &C,
-    factory: &F,
+    writer: SnapStateWriter<'_, F>,
     root_hash: B256,
     account_hashes: &[B256],
     storage_roots: &HashMap<B256, B256>,
@@ -254,7 +255,7 @@ where
         }
 
         if !entries.is_empty() {
-            write_hashed_storages(factory, &entries)?;
+            writer.write_storages(&entries)?;
         }
 
         idx += returned;
@@ -498,14 +499,14 @@ fn decode_storage_slots(slots: &[StorageData]) -> Result<DecodedStorageSlots, Sn
 /// Fetches and writes bytecodes for a set of code hashes.
 async fn fetch_bytecodes<C, F>(
     client: &C,
-    factory: &F,
+    writer: SnapStateWriter<'_, F>,
     code_hashes: &HashSet<B256>,
     request_id: &mut u64,
 ) -> Result<(), SnapSyncError>
 where
     C: SnapClient + 'static,
     F: DatabaseProviderFactory + Clone + Send + Sync + 'static,
-    F::ProviderRW: DBProvider,
+    F::ProviderRW: DBProvider + StateWriter,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
     let hashes: Vec<B256> = code_hashes.iter().copied().collect();
@@ -529,7 +530,7 @@ where
 
         let codes = match_bytecodes_to_hashes(chunk, &msg.codes)?;
         if !codes.is_empty() {
-            write_bytecodes(factory, &codes)?;
+            writer.write_bytecodes(&codes)?;
         }
     }
 

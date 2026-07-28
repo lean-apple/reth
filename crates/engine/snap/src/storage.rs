@@ -1,4 +1,4 @@
-//! Database write helpers for downloaded hashed state and bytecodes.
+//! Database writes for downloaded hashed state and bytecodes.
 
 use crate::SnapSyncError;
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
@@ -8,80 +8,87 @@ use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
 use reth_trie::{HashedPostStateSorted, HashedStorageSorted};
 
-/// Writes a batch of hashed accounts.
-pub(crate) fn write_hashed_accounts<F>(
-    factory: &F,
-    accounts: &[(B256, Account)],
-) -> Result<(), SnapSyncError>
-where
-    F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
-{
-    let mut sorted: Vec<_> =
-        accounts.iter().map(|(hash, account)| (*hash, Some(*account))).collect();
-    sorted.sort_unstable_by_key(|(hash, _)| *hash);
-
-    write_hashed_state(factory, HashedPostStateSorted::new(sorted, B256Map::default()))
+/// Persists verified snap state to the database.
+///
+/// Each write commits on its own: a batch is only durable once it has been checked against the
+/// pivot root, so a download interrupted mid-range leaves behind verified state rather than a
+/// partially written range.
+#[derive(Debug)]
+pub(crate) struct SnapStateWriter<'a, F> {
+    factory: &'a F,
 }
 
-/// Writes a batch of hashed storage slots, keyed by hashed account.
-pub(crate) fn write_hashed_storages<F>(
-    factory: &F,
-    entries: &[(B256, B256, U256)],
-) -> Result<(), SnapSyncError>
+// Hand-written so the writer stays copyable regardless of whether `F` is: deriving would bound
+// `Clone`/`Copy` on `F` even though the struct only holds a reference to it.
+impl<F> Clone for SnapStateWriter<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F> Copy for SnapStateWriter<'_, F> {}
+
+impl<'a, F> SnapStateWriter<'a, F>
 where
     F: DatabaseProviderFactory,
     F::ProviderRW: DBProvider + StateWriter,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
-    let mut slots_by_account: B256Map<Vec<(B256, U256)>> = B256Map::default();
-    for &(account_hash, slot_hash, value) in entries {
-        slots_by_account.entry(account_hash).or_default().push((slot_hash, value));
+    /// Creates a writer over the given provider factory.
+    pub(crate) const fn new(factory: &'a F) -> Self {
+        Self { factory }
     }
 
-    let storages = slots_by_account
-        .into_iter()
-        .map(|(account_hash, mut storage_slots)| {
-            storage_slots.sort_unstable_by_key(|(slot_hash, _)| *slot_hash);
-            (account_hash, HashedStorageSorted { storage_slots, wiped: false })
-        })
-        .collect();
+    /// Writes a batch of hashed accounts.
+    pub(crate) fn write_accounts(&self, accounts: &[(B256, Account)]) -> Result<(), SnapSyncError> {
+        let mut sorted: Vec<_> =
+            accounts.iter().map(|(hash, account)| (*hash, Some(*account))).collect();
+        sorted.sort_unstable_by_key(|(hash, _)| *hash);
 
-    write_hashed_state(factory, HashedPostStateSorted::new(Vec::new(), storages))
-}
+        self.write_hashed_state(HashedPostStateSorted::new(sorted, B256Map::default()))
+    }
 
-/// Writes a batch of contract bytecodes, skipping empty code.
-pub(crate) fn write_bytecodes<F>(factory: &F, codes: &[(B256, Bytes)]) -> Result<(), SnapSyncError>
-where
-    F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
-{
-    let provider = factory.database_provider_rw().map_err(db_err)?;
-    {
-        let tx = provider.tx_ref();
-        for (hash, code) in codes.iter().filter(|(_, code)| !code.is_empty()) {
-            tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone())).map_err(db_err)?;
+    /// Writes a batch of hashed storage slots, keyed by hashed account.
+    pub(crate) fn write_storages(
+        &self,
+        entries: &[(B256, B256, U256)],
+    ) -> Result<(), SnapSyncError> {
+        let mut slots_by_account: B256Map<Vec<(B256, U256)>> = B256Map::default();
+        for &(account_hash, slot_hash, value) in entries {
+            slots_by_account.entry(account_hash).or_default().push((slot_hash, value));
         }
-    }
-    provider.commit().map_err(db_err)?;
-    Ok(())
-}
 
-fn write_hashed_state<F>(
-    factory: &F,
-    hashed_state: HashedPostStateSorted,
-) -> Result<(), SnapSyncError>
-where
-    F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
-{
-    let provider = factory.database_provider_rw().map_err(db_err)?;
-    provider.write_hashed_state(&hashed_state).map_err(db_err)?;
-    provider.commit().map_err(db_err)?;
-    Ok(())
+        let storages = slots_by_account
+            .into_iter()
+            .map(|(account_hash, mut storage_slots)| {
+                storage_slots.sort_unstable_by_key(|(slot_hash, _)| *slot_hash);
+                (account_hash, HashedStorageSorted { storage_slots, wiped: false })
+            })
+            .collect();
+
+        self.write_hashed_state(HashedPostStateSorted::new(Vec::new(), storages))
+    }
+
+    /// Writes a batch of contract bytecodes, skipping empty code.
+    pub(crate) fn write_bytecodes(&self, codes: &[(B256, Bytes)]) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        {
+            let tx = provider.tx_ref();
+            for (hash, code) in codes.iter().filter(|(_, code)| !code.is_empty()) {
+                tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone()))
+                    .map_err(db_err)?;
+            }
+        }
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    fn write_hashed_state(&self, hashed_state: HashedPostStateSorted) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        provider.write_hashed_state(&hashed_state).map_err(db_err)?;
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
 }
 
 /// Returns the next hash after `hash`, used to resume a range past an already-received key.
@@ -100,7 +107,7 @@ pub(crate) fn increment_b256(hash: B256) -> B256 {
     B256::ZERO
 }
 
-pub(crate) fn db_err(err: impl core::fmt::Display) -> SnapSyncError {
+fn db_err(err: impl core::fmt::Display) -> SnapSyncError {
     SnapSyncError::Database(err.to_string())
 }
 
