@@ -8438,6 +8438,7 @@ dependencies = [
  "reth-db-api",
  "reth-eth-wire-types",
  "reth-network-p2p",
+ "reth-network-peers",
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",

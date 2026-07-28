@@ -17,6 +17,7 @@ use reth_network_p2p::{
     headers::client::HeadersClient,
     snap::client::{SnapClient, SnapResponse},
 };
+use reth_network_peers::PeerId;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{DatabaseProviderFactory, HeaderProvider};
 use reth_storage_api::DBProvider;
@@ -149,13 +150,20 @@ impl PivotTracker {
     {
         let (block_hash, expected) = self.resolve_commitment(client, factory, block_number).await?;
 
-        let bal = match self.buffered_blocks.get(&block_number).and_then(|block| block.bal.clone())
-        {
-            Some(bal) => bal,
-            None => self.fetch_bal(client, block_number, block_hash).await?,
-        };
+        let (peer, bal) =
+            match self.buffered_blocks.get(&block_number).and_then(|block| block.bal.clone()) {
+                // Delivered by the engine with the payload, so there is no peer to hold to account.
+                Some(bal) => (None, bal),
+                None => {
+                    let (peer, bal) = self.fetch_bal(client, block_number, block_hash).await?;
+                    (Some(peer), bal)
+                }
+            };
 
         if RawBal::new(bal.clone()).hash() != expected {
+            if let Some(peer) = peer {
+                client.report_bad_message(peer);
+            }
             return Err(SnapSyncError::BalVerification { block: block_number, expected })
         }
 
@@ -181,12 +189,13 @@ impl PivotTracker {
         }
     }
 
+    /// Requests a block's access list, returning it alongside the peer that served it.
     async fn fetch_bal<C>(
         &self,
         client: &C,
         block_number: u64,
         block_hash: B256,
-    ) -> Result<Bytes, SnapSyncError>
+    ) -> Result<(PeerId, Bytes), SnapSyncError>
     where
         C: SnapClient + 'static,
     {
@@ -201,19 +210,25 @@ impl PivotTracker {
                 SnapSyncError::Network(format!("snap BAL request for block {block_number}: {err}"))
             })?;
 
-        let SnapResponse::BlockAccessLists(msg) = response.into_data() else {
+        let (peer, data) = response.split();
+        let SnapResponse::BlockAccessLists(msg) = data else {
+            client.report_bad_message(peer);
             return Err(SnapSyncError::Network(format!(
                 "expected a block access lists response for block {block_number}"
             )))
         };
 
-        // Peers signal "I don't have this one" with an empty entry rather than a short reply.
-        msg.block_access_lists
+        // Peers signal "I don't have this one" with an empty entry rather than a short reply, so
+        // an absent entry is a legitimate answer and not grounds for penalizing.
+        let bal = msg
+            .block_access_lists
             .0
             .into_iter()
             .next()
             .flatten()
-            .ok_or(SnapSyncError::MissingBal(block_number))
+            .ok_or(SnapSyncError::MissingBal(block_number))?;
+
+        Ok((peer, bal))
     }
 
     /// Returns the block hash and access-list commitment for a block, from the local database if

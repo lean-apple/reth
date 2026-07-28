@@ -18,6 +18,7 @@ use reth_eth_wire_types::snap::{
     AccountData, GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage, StorageData,
 };
 use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
+use reth_network_peers::PeerId;
 use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
@@ -85,8 +86,12 @@ where
                     SnapSyncError::Network(format!("snap account range request failed: {err}"))
                 })?;
 
-            let SnapResponse::AccountRange(msg) = response.into_data() else {
-                return Err(SnapSyncError::Network("expected an account range response".into()))
+            let (peer, data) = response.split();
+            let SnapResponse::AccountRange(msg) = data else {
+                return self.reject(
+                    peer,
+                    SnapSyncError::Network("expected an account range response".into()),
+                )
             };
 
             if msg.accounts.is_empty() {
@@ -95,12 +100,12 @@ where
                 if msg.proof.is_empty() {
                     return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
                 }
-                self.verify_account_range(cursor, &[], &msg.proof)?;
+                self.checked(peer, self.verify_account_range(cursor, &[], &msg.proof))?;
                 return Ok(DownloadStateOutcome::Done)
             }
 
-            let decoded = Self::decode_account_range(&msg.accounts, cursor)?;
-            self.verify_account_range(cursor, &decoded, &msg.proof)?;
+            let decoded = self.checked(peer, Self::decode_account_range(&msg.accounts, cursor))?;
+            self.checked(peer, self.verify_account_range(cursor, &decoded, &msg.proof))?;
 
             let accounts = decoded
                 .iter()
@@ -171,14 +176,21 @@ where
                     SnapSyncError::Network(format!("snap storage range request failed: {err}"))
                 })?;
 
-            let SnapResponse::StorageRanges(msg) = response.into_data() else {
-                return Err(SnapSyncError::Network("expected a storage ranges response".into()))
+            let (peer, data) = response.split();
+            let SnapResponse::StorageRanges(msg) = data else {
+                return self.reject(
+                    peer,
+                    SnapSyncError::Network("expected a storage ranges response".into()),
+                )
             };
 
             if msg.slots.len() > chunk.len() {
-                return Err(SnapSyncError::Network(
-                    "snap storage range returned more slot lists than requested".into(),
-                ))
+                return self.reject(
+                    peer,
+                    SnapSyncError::Network(
+                        "snap storage range returned more slot lists than requested".into(),
+                    ),
+                )
             }
 
             // Servers answer with nothing at all when an account is missing at this root, rather
@@ -195,14 +207,12 @@ where
 
             for (i, slots) in msg.slots.iter().enumerate() {
                 let account_hash = chunk[i];
-                storage_roots.validate_slots(account_hash, B256::ZERO, slots)?;
+                self.checked(peer, storage_roots.validate_slots(account_hash, B256::ZERO, slots))?;
 
                 let account_slots = if Some(i) == truncated_index {
-                    let decoded = storage_roots.verify_partial(
-                        account_hash,
-                        B256::ZERO,
-                        slots,
-                        &msg.proof,
+                    let decoded = self.checked(
+                        peer,
+                        storage_roots.verify_partial(account_hash, B256::ZERO, slots, &msg.proof),
                     )?;
 
                     // An empty slot list with a proof is an absence proof for the whole storage
@@ -220,7 +230,7 @@ where
                         None => decoded,
                     }
                 } else {
-                    storage_roots.verify_complete(account_hash, slots)?
+                    self.checked(peer, storage_roots.verify_complete(account_hash, slots))?
                 };
 
                 storages.insert(account_hash, HashedStorage::from_iter(false, account_slots));
@@ -259,30 +269,35 @@ where
                     SnapSyncError::Network(format!("snap storage continuation failed: {err}"))
                 })?;
 
-            let SnapResponse::StorageRanges(msg) = response.into_data() else {
-                return Err(SnapSyncError::Network("expected a storage ranges response".into()))
+            let (peer, data) = response.split();
+            let SnapResponse::StorageRanges(msg) = data else {
+                return self.reject(
+                    peer,
+                    SnapSyncError::Network("expected a storage ranges response".into()),
+                )
             };
 
             if msg.slots.len() > 1 {
-                return Err(SnapSyncError::Network(
-                    "snap storage continuation returned multiple slot lists".into(),
-                ))
+                return self.reject(
+                    peer,
+                    SnapSyncError::Network(
+                        "snap storage continuation returned multiple slot lists".into(),
+                    ),
+                )
             }
 
             let Some(slots) = msg.slots.first() else { return Ok(StorageContinuation::Stale) };
 
-            storage_roots.validate_slots(account_hash, starting_hash, slots)?;
-            collected.extend(storage_roots.verify_partial(
-                account_hash,
-                starting_hash,
-                slots,
-                &msg.proof,
+            self.checked(peer, storage_roots.validate_slots(account_hash, starting_hash, slots))?;
+            collected.extend(self.checked(
+                peer,
+                storage_roots.verify_partial(account_hash, starting_hash, slots, &msg.proof),
             )?);
 
             // Without a boundary proof the peer reached the end of this account's storage.
             let next = slots.last().filter(|_| !msg.proof.is_empty()).map(|last| last.hash);
             let Some(next) = next.and_then(next_hash) else {
-                storage_roots.verify_root(account_hash, &collected)?;
+                self.checked(peer, storage_roots.verify_root(account_hash, &collected))?;
                 return Ok(StorageContinuation::Complete(collected))
             };
 
@@ -308,11 +323,13 @@ where
                     SnapSyncError::Network(format!("snap bytecode request failed: {err}"))
                 })?;
 
-            let SnapResponse::ByteCodes(msg) = response.into_data() else {
-                return Err(SnapSyncError::Network("expected a byte codes response".into()))
+            let (peer, data) = response.split();
+            let SnapResponse::ByteCodes(msg) = data else {
+                return self
+                    .reject(peer, SnapSyncError::Network("expected a byte codes response".into()))
             };
 
-            let codes = Self::match_bytecodes(chunk, &msg.codes)?;
+            let codes = self.checked(peer, Self::match_bytecodes(chunk, &msg.codes))?;
             if !codes.is_empty() {
                 self.writer.write_bytecodes(&codes)?;
             }
@@ -324,6 +341,27 @@ where
     const fn next_request_id(&mut self) -> u64 {
         self.request_id += 1;
         self.request_id
+    }
+
+    /// Reports the peer whose response failed validation, then surfaces the error.
+    ///
+    /// A peer that serves an unusable response is not merely unlucky: every check here is one a
+    /// correct server passes, so without penalizing, the same peer keeps being picked and the
+    /// download makes no progress.
+    fn checked<T>(
+        &self,
+        peer: PeerId,
+        result: Result<T, SnapSyncError>,
+    ) -> Result<T, SnapSyncError> {
+        if result.is_err() {
+            self.client.report_bad_message(peer);
+        }
+        result
+    }
+
+    /// Rejects a response outright, penalizing the peer that sent it.
+    fn reject<T>(&self, peer: PeerId, err: SnapSyncError) -> Result<T, SnapSyncError> {
+        self.checked(peer, Err(err))
     }
 }
 
