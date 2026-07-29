@@ -11,7 +11,7 @@ use reth_eth_wire_types::snap::{GetStorageRangesMessage, StorageData, StorageRan
 use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
-use reth_trie::{root::storage_root, HashedPostState, HashedStorage};
+use reth_trie::{root::storage_root, HashedStorage};
 
 impl<C, F> StateDownloader<'_, C, F>
 where
@@ -23,11 +23,16 @@ where
     /// Fetches and writes storage for one account batch.
     ///
     /// Returns `true` when the serving peer no longer has the root.
-    pub(super) async fn download_storage(
+    /// Collects the complete storage for `account_hashes`, or `None` if the root went away.
+    ///
+    /// Nothing is written here: the caller commits storage together with the accounts it belongs
+    /// to, so a stale root cannot leave one durable without the other.
+    pub(super) async fn collect_storage(
         &mut self,
         account_hashes: &[B256],
         storage_roots: &StorageRoots,
-    ) -> Result<bool, SnapSyncError> {
+    ) -> Result<Option<B256Map<HashedStorage>>, SnapSyncError> {
+        let mut collected = B256Map::default();
         let mut idx = 0;
 
         while idx < account_hashes.len() {
@@ -38,7 +43,7 @@ where
             else {
                 // Servers answer with nothing at all when an account is missing at this root,
                 // rather than skipping it, so an empty response means the root is gone.
-                return Ok(true)
+                return Ok(None)
             };
 
             let returned = msg.slots.len();
@@ -62,7 +67,7 @@ where
                                 .await?
                             {
                                 StorageContinuation::Complete(slots) => slots,
-                                StorageContinuation::Stale => return Ok(true),
+                                StorageContinuation::Stale => return Ok(None),
                             }
                         }
                         None => decoded,
@@ -76,12 +81,11 @@ where
                 storages.insert(account_hash, HashedStorage::from_iter(true, account_slots));
             }
 
-            self.writer.write_state(HashedPostState { accounts: B256Map::default(), storages })?;
-
+            collected.extend(storages);
             idx += returned;
         }
 
-        Ok(false)
+        Ok(Some(collected))
     }
 
     /// Requests storage for `accounts`, retrying with another peer on an untrustworthy response.

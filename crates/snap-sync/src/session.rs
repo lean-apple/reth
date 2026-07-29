@@ -199,17 +199,34 @@ where
             return Err(SnapSyncError::Network("session has nothing to finalize".into()))
         };
 
-        let head = self.chain.head();
-        if applied.hash != head.hash && self.chain.segment(applied.hash, head.hash).await.is_err() {
-            self.state = SyncState::Idle;
-            return Err(SnapSyncError::Reorged(applied.hash))
-        }
+        let token = self.chain.canonical_token();
+        self.ensure_canonical(applied).await?;
 
         self.writer().finalize_sync(applied.number, applied.state_root)?;
+
+        // Rebuilding the trie walks the whole state, long enough for forkchoice to move
+        // underneath it and leave the check above stale. The work is only trusted if no
+        // forkchoice update landed while it was running; the trie tables it wrote are rebuilt
+        // from hashed state on the next attempt either way.
+        if self.chain.canonical_token() != token {
+            self.ensure_canonical(applied).await?;
+        }
+
         self.state = SyncState::Complete { at: applied };
 
         info!(target: "snap", number = applied.number, hash = %applied.hash, "Snap sync complete");
         Ok(applied)
+    }
+
+    /// Fails when `block` is no longer on the canonical chain, resetting the session.
+    async fn ensure_canonical(&mut self, block: BlockRef) -> Result<(), SnapSyncError> {
+        let head = self.chain.head();
+        if block.hash == head.hash || self.chain.segment(block.hash, head.hash).await.is_ok() {
+            return Ok(())
+        }
+
+        self.state = SyncState::Idle;
+        Err(SnapSyncError::Reorged(block.hash))
     }
 
     /// Returns a block's access list, verified against the header's commitment.

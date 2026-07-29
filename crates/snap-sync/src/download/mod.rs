@@ -21,7 +21,7 @@ use reth_network_peers::PeerId;
 use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
-use reth_trie::HashedPostState;
+use reth_trie::{HashedPostState, TrieAccount};
 use storage::StorageRoots;
 use tracing::debug;
 
@@ -60,6 +60,13 @@ where
     }
 
     /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
+    /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
+    ///
+    /// A served account range is committed in micro-batches: nothing becomes durable until that
+    /// batch's accounts, their complete storage and every bytecode they reference are in hand and
+    /// written together. Writing accounts ahead of their storage would let a stale root strand
+    /// accounts above the resume point, where the rolling target transition no longer reaches
+    /// them and a later range at a fresher root would not mention the ones that had been deleted.
     pub async fn run(
         &mut self,
         starting_hash: B256,
@@ -67,10 +74,6 @@ where
         let mut cursor = starting_hash;
 
         loop {
-            // Retrying a stale root restarts at the batch boundary, not mid-batch, so an account's
-            // storage and code are never left half-written against a root we stopped trusting.
-            let batch_start = cursor;
-
             let (decoded, exhausted) = match self.fetch_account_range(cursor).await? {
                 AccountRange::Unavailable => {
                     return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
@@ -79,43 +82,64 @@ where
                 AccountRange::Verified { accounts, exhausted } => (accounts, exhausted),
             };
 
-            let accounts = decoded
-                .iter()
-                .map(|(hash, account)| (*hash, Some(Account::from(*account))))
-                .collect::<B256Map<_>>();
-            let code_hashes = decoded
-                .iter()
-                .map(|(_, account)| account.code_hash)
-                .filter(|hash| *hash != KECCAK256_EMPTY)
-                .collect::<B256Set>();
-            let storage_roots = StorageRoots(
-                decoded.iter().map(|(hash, account)| (*hash, account.storage_root)).collect(),
-            );
-
             debug!(
-                target: "engine::snap",
-                accounts = accounts.len(),
+                target: "snap",
+                accounts = decoded.len(),
                 root_hash = %self.root_hash,
-                "Downloaded account range"
+                "Verified account range"
             );
-            self.writer.write_state(HashedPostState { accounts, storages: B256Map::default() })?;
 
-            let account_hashes: Vec<B256> = decoded.iter().map(|(hash, _)| *hash).collect();
-            if self.download_storage(&account_hashes, &storage_roots).await? {
-                return Ok(DownloadStateOutcome::Stale { resume_from: batch_start })
+            for micro_batch in decoded.chunks(STORAGE_BATCH_SIZE) {
+                // Resuming here re-downloads only this micro-batch, and everything below it is
+                // already durable and complete.
+                let resume_from = micro_batch[0].0;
+
+                if !self.commit_micro_batch(micro_batch).await? {
+                    return Ok(DownloadStateOutcome::Stale { resume_from })
+                }
             }
-
-            self.download_bytecodes(&code_hashes).await?;
 
             // An exhausted range was already checked against the root, so there is nothing after
             // it.
-            let last_hash = account_hashes.last().copied().expect("checked non-empty above");
             if exhausted {
                 return Ok(DownloadStateOutcome::Done)
             }
+            let last_hash = decoded.last().map(|(hash, _)| *hash).expect("range was not empty");
             let Some(next) = next_hash(last_hash) else { return Ok(DownloadStateOutcome::Done) };
             cursor = next;
         }
+    }
+
+    /// Assembles one micro-batch and commits it as a unit.
+    ///
+    /// Returns `false` when the root went stale part-way, in which case nothing was written.
+    async fn commit_micro_batch(
+        &mut self,
+        batch: &[(B256, TrieAccount)],
+    ) -> Result<bool, SnapSyncError> {
+        let account_hashes: Vec<B256> = batch.iter().map(|(hash, _)| *hash).collect();
+        let storage_roots = StorageRoots(
+            batch.iter().map(|(hash, account)| (*hash, account.storage_root)).collect(),
+        );
+
+        let Some(storages) = self.collect_storage(&account_hashes, &storage_roots).await? else {
+            return Ok(false)
+        };
+
+        let code_hashes: B256Set = batch
+            .iter()
+            .map(|(_, account)| account.code_hash)
+            .filter(|hash| *hash != KECCAK256_EMPTY)
+            .collect();
+        let bytecodes = self.collect_bytecodes(&code_hashes).await?;
+
+        let accounts = batch
+            .iter()
+            .map(|(hash, account)| (*hash, Some(Account::from(*account))))
+            .collect::<B256Map<_>>();
+
+        self.writer.commit_batch(HashedPostState { accounts, storages }, &bytecodes)?;
+        Ok(true)
     }
 
     const fn next_request_id(&mut self) -> u64 {

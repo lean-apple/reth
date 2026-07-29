@@ -35,6 +35,13 @@ pub trait CanonicalChainSource: Send + Sync {
     /// Returns the current canonical head.
     fn head(&self) -> BlockRef;
 
+    /// Returns a token that changes whenever forkchoice moves the canonical head.
+    ///
+    /// Rebuilding the state trie takes long enough that the head can move during it, so the token
+    /// is read before the work and compared after: equal means no forkchoice update landed and a
+    /// canonicality check taken beforehand still holds.
+    fn canonical_token(&self) -> u64;
+
     /// Returns the block `depth` blocks below `from`, found by following parent links.
     ///
     /// This is how a pivot is chosen. Subtracting from a height would name a block on whichever

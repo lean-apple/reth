@@ -61,6 +61,33 @@ where
         Ok(())
     }
 
+    /// Writes hashed state and the bytecodes it references in a single transaction.
+    ///
+    /// One transaction is what makes a downloaded batch all-or-nothing: an account is never
+    /// durable without the storage and code it commits to, so an interrupted download leaves a
+    /// shorter prefix rather than an inconsistent one.
+    pub fn commit_batch(
+        &self,
+        state: HashedPostState,
+        codes: &[(B256, Bytes)],
+    ) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+
+        if !state.is_empty() {
+            provider.write_hashed_state(&state.into_sorted()).map_err(db_err)?;
+        }
+        {
+            let tx = provider.tx_ref();
+            for (hash, code) in codes.iter().filter(|(_, code)| !code.is_empty()) {
+                tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone()))
+                    .map_err(db_err)?;
+            }
+        }
+
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
+
     /// Writes hashed accounts and storage slots.
     pub fn write_state(&self, state: HashedPostState) -> Result<(), SnapSyncError> {
         if state.is_empty() {

@@ -10,7 +10,11 @@
 
 use crate::{error::SnapSyncError, store::SnapStateWriter};
 use alloy_eip7928::AccountChanges;
-use alloy_primitives::{keccak256, map::B256Map, Bytes, B256, KECCAK256_EMPTY, U256};
+use alloy_primitives::{
+    keccak256,
+    map::{B256Map, B256Set},
+    Bytes, B256, KECCAK256_EMPTY, U256,
+};
 use alloy_rlp::Decodable;
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_primitives_traits::Account;
@@ -107,6 +111,7 @@ impl BlockStateDiff {
         let within = |address: &B256| limit.is_none_or(|limit| *address < limit);
 
         let mut accounts = B256Map::default();
+        let mut deleted = B256Set::default();
         for diff in self.accounts.iter().filter(|diff| within(&diff.hashed_address)) {
             let existing = writer.read_account(diff.hashed_address)?;
             let merged = diff.merge_onto(existing.as_ref());
@@ -114,17 +119,32 @@ impl BlockStateDiff {
             // An account left with no balance, no nonce and no code does not exist under
             // EIP-161, so it has to be removed rather than written as an empty leaf. Storing one
             // would put a node in the trie that the block's state root does not account for.
-            accounts.insert(diff.hashed_address, (!merged.is_empty()).then_some(merged));
+            if merged.is_empty() {
+                deleted.insert(diff.hashed_address);
+                accounts.insert(diff.hashed_address, None);
+            } else {
+                accounts.insert(diff.hashed_address, Some(merged));
+            }
         }
 
-        let storages = self
+        let mut storages: B256Map<HashedStorage> = self
             .storage
             .iter()
             .filter(|(address, _)| within(address))
             .map(|(address, slots)| {
-                (*address, HashedStorage::from_iter(false, slots.iter().map(|(k, v)| (*k, *v))))
+                // A block access list states the slots it changed, not the ones it left alone, so
+                // these merge onto what is stored.
+                let wiped = deleted.contains(address);
+                (*address, HashedStorage::from_iter(wiped, slots.iter().map(|(k, v)| (*k, *v))))
             })
             .collect();
+
+        // Storage rows are only cleared for an account marked wiped, so a deleted account that
+        // changed no slots still needs an entry; otherwise its slots outlive it and a later
+        // recreation at the same address inherits them.
+        for address in deleted {
+            storages.entry(address).or_insert_with(|| HashedStorage::new(true));
+        }
 
         writer.write_state(HashedPostState { accounts, storages })?;
         if !self.bytecodes.is_empty() {

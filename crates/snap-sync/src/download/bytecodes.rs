@@ -26,10 +26,13 @@ where
     /// left out have to be asked for again. Dropping them would leave accounts pointing at code
     /// the database does not have, which the state root check cannot detect because code lives
     /// outside the trie.
-    pub(super) async fn download_bytecodes(
+    ///
+    /// Nothing is written here; the caller commits the code with the accounts that reference it.
+    pub(super) async fn collect_bytecodes(
         &mut self,
         code_hashes: &B256Set,
-    ) -> Result<(), SnapSyncError> {
+    ) -> Result<Vec<(B256, Bytes)>, SnapSyncError> {
+        let mut collected = Vec::with_capacity(code_hashes.len());
         let mut pending: Vec<B256> = code_hashes.iter().copied().collect();
 
         while !pending.is_empty() {
@@ -38,13 +41,11 @@ where
 
             for chunk in pending.chunks(BYTECODE_BATCH_SIZE) {
                 let codes = self.fetch_bytecodes(chunk).await?;
-                if !codes.is_empty() {
-                    served_any = true;
-                    self.writer.write_bytecodes(&codes)?;
-                }
+                served_any |= !codes.is_empty();
 
                 let served: B256Set = codes.iter().map(|(hash, _)| *hash).collect();
                 outstanding.extend(chunk.iter().copied().filter(|hash| !served.contains(hash)));
+                collected.extend(codes);
             }
 
             // Every round either delivers code or the remaining hashes are unobtainable; without
@@ -59,7 +60,7 @@ where
             pending = outstanding;
         }
 
-        Ok(())
+        Ok(collected)
     }
 
     /// Requests bytecodes, retrying with another peer on an untrustworthy response.
@@ -114,7 +115,7 @@ impl<C, F> StateDownloader<'_, C, F> {
     ///
     /// Servers may drop entries they don't have but must keep request order, so a short reply is a
     /// valid prefix while a reordered or duplicated one is not. The hashes it left out are
-    /// re-requested by [`download_bytecodes`](Self::download_bytecodes) rather than dropped.
+    /// re-requested by [`collect_bytecodes`](Self::collect_bytecodes) rather than dropped.
     fn match_bytecodes(
         requested_hashes: &[B256],
         codes: &[Bytes],
