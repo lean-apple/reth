@@ -12,7 +12,7 @@ use crate::{
     heal::{decode_block_access_list, BlockStateDiff},
     metrics::SnapSyncMetrics,
     store::SnapStateWriter,
-    PIVOT_OFFSET, SNAP_RESPONSE_BYTES_LIMIT,
+    MAX_REQUEST_ATTEMPTS, PIVOT_OFFSET, SNAP_RESPONSE_BYTES_LIMIT,
 };
 use alloy_eip7928::bal::RawBal;
 use alloy_primitives::{Bytes, B256};
@@ -101,6 +101,58 @@ where
         }
     }
 
+    /// Moves the session to a fresher target, carrying the downloaded prefix across.
+    ///
+    /// This is EIP-8189's rolling transition and the normal answer to a target no peer will serve
+    /// any more. The prefix below `covered_end` was assembled at the old target's root, so every
+    /// access list between the two targets is applied to it; skipping that would leave a prefix
+    /// from one state beside a suffix from another, which matches no block at all.
+    ///
+    /// Returns [`StepOutcome::TargetStale`] when the chain has not moved far enough to offer a
+    /// newer target, and [`StepOutcome::Reorged`] when the old target is no longer an ancestor of
+    /// the new one, which leaves the prefix unreconcilable and restarts the session.
+    pub async fn advance_target(&mut self) -> Result<StepOutcome, SnapSyncError> {
+        let SyncState::Downloading { target, covered_end } = self.state else {
+            return Err(SnapSyncError::Network("session is not downloading".into()))
+        };
+
+        let head = self.chain.head();
+        let new_target = self
+            .chain
+            .ancestor(head.hash, PIVOT_OFFSET)
+            .await
+            .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
+
+        if new_target.hash == target.hash {
+            return Ok(StepOutcome::TargetStale)
+        }
+
+        let segment = match self.chain.segment(target.hash, new_target.hash).await {
+            Ok(segment) => segment,
+            Err(err) => {
+                debug!(target: "snap", %err, "Target left the canonical chain");
+                self.state = SyncState::Idle;
+                return Ok(StepOutcome::Reorged)
+            }
+        };
+
+        for block in segment {
+            let bal = self.verified_bal(&block).await?;
+            let changes = decode_block_access_list(&bal, block.number)?;
+            BlockStateDiff::from_changes(&changes).apply(self.writer(), Some(covered_end))?;
+            self.metrics.access_lists_applied.increment(1);
+        }
+
+        info!(
+            target: "snap",
+            from = target.number,
+            to = new_target.number,
+            "Advanced snap sync target"
+        );
+        self.state = SyncState::Downloading { target: new_target, covered_end };
+        Ok(StepOutcome::Advanced)
+    }
+
     /// Applies the access lists from the current target up to the canonical head.
     ///
     /// Each block is taken by hash from a segment walked over parent links, so a head that moved
@@ -126,7 +178,7 @@ where
         for block in segment {
             let bal = self.verified_bal(&block).await?;
             let changes = decode_block_access_list(&bal, block.number)?;
-            BlockStateDiff::from_changes(&changes).apply(self.writer())?;
+            BlockStateDiff::from_changes(&changes).apply(self.writer(), None)?;
 
             applied = block;
             self.metrics.access_lists_applied.increment(1);
@@ -138,10 +190,20 @@ where
     }
 
     /// Rebuilds the state trie, checks its root, and persists the trie tables.
-    pub fn finalize(&mut self) -> Result<BlockRef, SnapSyncError> {
+    ///
+    /// The block the state was assembled for is re-anchored against forkchoice first. The head
+    /// can move while access lists are being applied, and a root that matches an orphaned block
+    /// is still a root that matches nothing the node will build on.
+    pub async fn finalize(&mut self) -> Result<BlockRef, SnapSyncError> {
         let SyncState::Healing { applied, .. } = self.state else {
             return Err(SnapSyncError::Network("session has nothing to finalize".into()))
         };
+
+        let head = self.chain.head();
+        if applied.hash != head.hash && self.chain.segment(applied.hash, head.hash).await.is_err() {
+            self.state = SyncState::Idle;
+            return Err(SnapSyncError::Reorged(applied.hash))
+        }
 
         self.writer().finalize_sync(applied.number, applied.state_root)?;
         self.state = SyncState::Complete { at: applied };
@@ -175,7 +237,24 @@ where
         Ok(bal)
     }
 
+    /// Requests a block's access list, retrying with another peer on an unusable response.
     async fn fetch_bal(
+        &self,
+        block: &BlockRef,
+    ) -> Result<(reth_network_peers::PeerId, Bytes), SnapSyncError> {
+        let mut last_error = None;
+
+        for _ in 0..MAX_REQUEST_ATTEMPTS {
+            match self.request_bal(block).await {
+                Ok(found) => return Ok(found),
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error.expect("at least one attempt was made"))
+    }
+
+    async fn request_bal(
         &self,
         block: &BlockRef,
     ) -> Result<(reth_network_peers::PeerId, Bytes), SnapSyncError> {

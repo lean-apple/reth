@@ -50,6 +50,12 @@ pub use store::SnapStateWriter;
 /// in the engine's in-memory overlay.
 pub const PIVOT_OFFSET: u64 = 16;
 
+/// How many peers a single request is tried against before the session gives up.
+///
+/// A peer that answers with something unusable is reported and the request reissued, so one bad
+/// peer costs a round trip rather than the whole sync.
+pub(crate) const MAX_REQUEST_ATTEMPTS: usize = 3;
+
 /// Soft response size limit requested for snap protocol messages (2 MiB).
 ///
 /// Matches the cap servers apply, so asking for more only wastes a round trip.

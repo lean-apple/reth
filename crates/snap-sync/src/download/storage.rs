@@ -1,7 +1,10 @@
 //! Storage range, continuation and single-slot requests.
 
-use super::{next_hash, StateDownloader, MAX_HASH, MAX_REQUEST_ATTEMPTS, STORAGE_BATCH_SIZE};
-use crate::{error::SnapSyncError, proof::verify_range_proof, SNAP_RESPONSE_BYTES_LIMIT};
+use super::{next_hash, StateDownloader, MAX_HASH, STORAGE_BATCH_SIZE};
+use crate::{
+    error::SnapSyncError, proof::verify_range_proof, MAX_REQUEST_ATTEMPTS,
+    SNAP_RESPONSE_BYTES_LIMIT,
+};
 use alloy_primitives::{map::B256Map, Bytes, B256, U256};
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::{GetStorageRangesMessage, StorageData, StorageRangesMessage};
@@ -68,7 +71,9 @@ where
                     storage_roots.decode_slots(slots)?
                 };
 
-                storages.insert(account_hash, HashedStorage::from_iter(false, account_slots));
+                // A complete zero-origin trie replaces whatever was stored for this account:
+                // merging would keep slots that the trie being downloaded does not contain.
+                storages.insert(account_hash, HashedStorage::from_iter(true, account_slots));
             }
 
             self.writer.write_state(HashedPostState { accounts: B256Map::default(), storages })?;
@@ -91,6 +96,7 @@ where
         storage_roots: &StorageRoots,
     ) -> Result<Option<StorageRangesMessage>, SnapSyncError> {
         let mut last_error = None;
+        let mut unavailable = false;
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             let request_id = self.next_request_id();
@@ -134,8 +140,11 @@ where
                 continue
             }
 
+            // This peer cannot serve the root, but another still might, so keep the attempt
+            // budget rather than ending the request on the first empty reply.
             if msg.slots.is_empty() {
-                return Ok(None)
+                unavailable = true;
+                continue
             }
 
             match storage_roots.verify_response(accounts, origin, &msg) {
@@ -144,6 +153,9 @@ where
             }
         }
 
+        if unavailable {
+            return Ok(None)
+        }
         Err(last_error.expect("at least one attempt was made"))
     }
 

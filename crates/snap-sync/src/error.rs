@@ -40,6 +40,9 @@ pub enum SnapSyncError {
         /// Root rebuilt from the downloaded state.
         computed: B256,
     },
+    /// The block the session assembled state for is no longer canonical.
+    #[error("block {0} left the canonical chain before the sync could be finalized")]
+    Reorged(B256),
     /// A header required to resolve a pivot or a BAL commitment could not be found.
     #[error("header not found for block {0}")]
     MissingHeader(u64),

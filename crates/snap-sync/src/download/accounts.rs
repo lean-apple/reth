@@ -1,14 +1,17 @@
 //! Account range and single-account requests.
 
-use super::{StateDownloader, MAX_HASH, MAX_REQUEST_ATTEMPTS};
-use crate::{error::SnapSyncError, proof::verify_range_proof, SNAP_RESPONSE_BYTES_LIMIT};
+use super::{StateDownloader, MAX_HASH};
+use crate::{
+    error::SnapSyncError, proof::verify_range_proof, MAX_REQUEST_ATTEMPTS,
+    SNAP_RESPONSE_BYTES_LIMIT,
+};
 use alloy_primitives::{Bytes, B256};
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::{AccountData, GetAccountRangeMessage};
 use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
-use reth_trie::TrieAccount;
+use reth_trie::{TrieAccount, EMPTY_ROOT_HASH};
 
 impl<C, F> StateDownloader<'_, C, F>
 where
@@ -27,6 +30,7 @@ where
         cursor: B256,
     ) -> Result<AccountRange, SnapSyncError> {
         let mut last_error = None;
+        let mut unavailable = false;
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             let request_id = self.next_request_id();
@@ -62,10 +66,16 @@ where
             };
 
             if msg.accounts.is_empty() {
-                // A server that cannot serve the root replies fully empty; an absence proof
-                // instead means the range really is past the last account.
+                // An empty trie holds no accounts and has no proof to give, so a bare reply is
+                // the only answer a correct server can send.
+                if self.root_hash == EMPTY_ROOT_HASH {
+                    return Ok(AccountRange::PastTheEnd)
+                }
+                // Otherwise this peer cannot serve the root; another still might, so spend an
+                // attempt rather than ending the request here.
                 if msg.proof.is_empty() {
-                    return Ok(AccountRange::Unavailable)
+                    unavailable = true;
+                    continue
                 }
                 match self.verify_account_range(cursor, &[], &msg.proof) {
                     Ok(()) => return Ok(AccountRange::PastTheEnd),
@@ -91,6 +101,9 @@ where
             return Ok(AccountRange::Verified { accounts, exhausted: msg.proof.is_empty() })
         }
 
+        if unavailable {
+            return Ok(AccountRange::Unavailable)
+        }
         Err(last_error.expect("at least one attempt was made"))
     }
 }

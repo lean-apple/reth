@@ -34,12 +34,6 @@ const BYTECODE_BATCH_SIZE: usize = 50;
 /// Upper bound of the hashed key space.
 const MAX_HASH: B256 = B256::new([0xff; 32]);
 
-/// How many peers a single request is tried against before the download gives up.
-///
-/// A peer that answers with something unusable is reported and the request reissued, so one bad
-/// peer costs a round trip rather than the whole sync.
-const MAX_REQUEST_ATTEMPTS: usize = 3;
-
 /// Downloads the hashed state at one state root from snap peers.
 #[derive(Debug)]
 pub struct StateDownloader<'a, C, F> {

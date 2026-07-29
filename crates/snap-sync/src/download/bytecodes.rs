@@ -1,7 +1,7 @@
 //! Bytecode requests.
 
-use super::{StateDownloader, BYTECODE_BATCH_SIZE, MAX_REQUEST_ATTEMPTS};
-use crate::{error::SnapSyncError, SNAP_RESPONSE_BYTES_LIMIT};
+use super::{StateDownloader, BYTECODE_BATCH_SIZE};
+use crate::{error::SnapSyncError, MAX_REQUEST_ATTEMPTS, SNAP_RESPONSE_BYTES_LIMIT};
 use alloy_primitives::{
     keccak256,
     map::{B256Map, B256Set},
@@ -20,18 +20,43 @@ where
     F::ProviderRW: DBProvider + StateWriter,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
-    /// Fetches and writes bytecodes for a set of code hashes.
+    /// Fetches and writes every requested bytecode, re-requesting whatever is still outstanding.
+    ///
+    /// A short reply is legitimate — servers cut responses at a size limit — so the hashes it
+    /// left out have to be asked for again. Dropping them would leave accounts pointing at code
+    /// the database does not have, which the state root check cannot detect because code lives
+    /// outside the trie.
     pub(super) async fn download_bytecodes(
         &mut self,
         code_hashes: &B256Set,
     ) -> Result<(), SnapSyncError> {
-        let hashes: Vec<B256> = code_hashes.iter().copied().collect();
+        let mut pending: Vec<B256> = code_hashes.iter().copied().collect();
 
-        for chunk in hashes.chunks(BYTECODE_BATCH_SIZE) {
-            let codes = self.fetch_bytecodes(chunk).await?;
-            if !codes.is_empty() {
-                self.writer.write_bytecodes(&codes)?;
+        while !pending.is_empty() {
+            let mut outstanding = Vec::new();
+            let mut served_any = false;
+
+            for chunk in pending.chunks(BYTECODE_BATCH_SIZE) {
+                let codes = self.fetch_bytecodes(chunk).await?;
+                if !codes.is_empty() {
+                    served_any = true;
+                    self.writer.write_bytecodes(&codes)?;
+                }
+
+                let served: B256Set = codes.iter().map(|(hash, _)| *hash).collect();
+                outstanding.extend(chunk.iter().copied().filter(|hash| !served.contains(hash)));
             }
+
+            // Every round either delivers code or the remaining hashes are unobtainable; without
+            // this the loop would reissue the same unanswered request forever.
+            if !served_any {
+                return Err(SnapSyncError::Network(format!(
+                    "no peer served {} outstanding bytecode(s)",
+                    outstanding.len()
+                )))
+            }
+
+            pending = outstanding;
         }
 
         Ok(())
@@ -88,7 +113,8 @@ impl<C, F> StateDownloader<'_, C, F> {
     /// Pairs returned bytecodes with the hashes that were requested.
     ///
     /// Servers may drop entries they don't have but must keep request order, so a short reply is a
-    /// valid prefix while a reordered or duplicated one is not.
+    /// valid prefix while a reordered or duplicated one is not. The hashes it left out are
+    /// re-requested by [`download_bytecodes`](Self::download_bytecodes) rather than dropped.
     fn match_bytecodes(
         requested_hashes: &[B256],
         codes: &[Bytes],

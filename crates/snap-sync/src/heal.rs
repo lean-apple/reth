@@ -88,7 +88,15 @@ impl BlockStateDiff {
     }
 
     /// Merges this diff onto the state already in the database and writes the result.
-    pub(crate) fn apply<F>(&self, writer: SnapStateWriter<'_, F>) -> Result<(), SnapSyncError>
+    ///
+    /// `limit` restricts the write to accounts below that hashed address. A session moving its
+    /// target uses it to carry only the prefix it has already downloaded; the rest of the trie
+    /// arrives at the new root anyway, so applying to it would be wasted work at best.
+    pub(crate) fn apply<F>(
+        &self,
+        writer: SnapStateWriter<'_, F>,
+        limit: Option<B256>,
+    ) -> Result<(), SnapSyncError>
     where
         F: DatabaseProviderFactory,
         F::Provider: DBProvider,
@@ -96,15 +104,23 @@ impl BlockStateDiff {
         <F::Provider as DBProvider>::Tx: DbTx,
         <F::ProviderRW as DBProvider>::Tx: DbTxMut,
     {
+        let within = |address: &B256| limit.is_none_or(|limit| *address < limit);
+
         let mut accounts = B256Map::default();
-        for diff in &self.accounts {
+        for diff in self.accounts.iter().filter(|diff| within(&diff.hashed_address)) {
             let existing = writer.read_account(diff.hashed_address)?;
-            accounts.insert(diff.hashed_address, Some(diff.merge_onto(existing.as_ref())));
+            let merged = diff.merge_onto(existing.as_ref());
+
+            // An account left with no balance, no nonce and no code does not exist under
+            // EIP-161, so it has to be removed rather than written as an empty leaf. Storing one
+            // would put a node in the trie that the block's state root does not account for.
+            accounts.insert(diff.hashed_address, (!merged.is_empty()).then_some(merged));
         }
 
         let storages = self
             .storage
             .iter()
+            .filter(|(address, _)| within(address))
             .map(|(address, slots)| {
                 (*address, HashedStorage::from_iter(false, slots.iter().map(|(k, v)| (*k, *v))))
             })
