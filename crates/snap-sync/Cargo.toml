@@ -1,5 +1,5 @@
 [package]
-name = "reth-engine-snap"
+name = "reth-snap-sync"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,8 @@ workspace = true
 reth-db-api.workspace = true
 reth-eth-wire-types.workspace = true
 reth-network-p2p.workspace = true
+metrics.workspace = true
+reth-metrics.workspace = true
 reth-network-peers.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
@@ -24,21 +26,16 @@ reth-trie.workspace = true
 reth-trie-db.workspace = true
 
 # alloy
-alloy-consensus.workspace = true
 alloy-eip7928 = { workspace = true, features = ["rlp"] }
-alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
-alloy-trie.workspace = true
-
-# async
-tokio = { workspace = true, features = ["sync"] }
 
 # misc
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+alloy-trie.workspace = true
 reth-db-api = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }

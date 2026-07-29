@@ -26,7 +26,6 @@ members = [
     "crates/engine/invalid-block-hooks/",
     "crates/engine/local",
     "crates/engine/primitives/",
-    "crates/engine/snap/",
     "crates/engine/execution-cache/",
     "crates/engine/tree/",
     "crates/engine/util/",
@@ -93,6 +92,7 @@ members = [
     "crates/rpc/rpc-convert/",
     "crates/rpc/rpc/",
     "crates/stages/api/",
+    "crates/snap-sync/",
     "crates/stages/stages/",
     "crates/stages/types/",
     "crates/static-file/static-file",
@@ -342,7 +342,6 @@ reth-ecies = { path = "crates/net/ecies" }
 reth-engine-local = { path = "crates/engine/local" }
 reth-execution-cache = { path = "crates/engine/execution-cache" }
 reth-engine-primitives = { path = "crates/engine/primitives", default-features = false }
-reth-engine-snap = { path = "crates/engine/snap" }
 reth-engine-tree = { path = "crates/engine/tree" }
 reth-engine-util = { path = "crates/engine/util" }
 reth-era = { path = "crates/era" }
@@ -409,6 +408,7 @@ reth-rpc-layer = { path = "crates/rpc/rpc-layer" }
 reth-rpc-server-types = { path = "crates/rpc/rpc-server-types" }
 reth-rpc-convert = { path = "crates/rpc/rpc-convert" }
 reth-rpc-traits = { version = "0.6.0", default-features = false }
+reth-snap-sync = { path = "crates/snap-sync" }
 reth-stages = { path = "crates/stages/stages" }
 reth-stages-api = { path = "crates/stages/api" }
 reth-stages-types = { path = "crates/stages/types", default-features = false }

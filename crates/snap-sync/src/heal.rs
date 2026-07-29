@@ -1,4 +1,4 @@
-//! Applying block access lists to bring downloaded state forward.
+//! Healing: verifying block access lists and applying them to downloaded state.
 //!
 //! This is what EIP-8189 replaces snap/1's trie healing with. A block's access list (EIP-7928)
 //! records the post-block value of every account field and storage slot the block touched, so the
@@ -8,7 +8,7 @@
 //! A BAL only carries the fields a block changed, so applying one means merging it onto the
 //! account already in the database rather than overwriting it.
 
-use crate::{storage::SnapStateWriter, SnapSyncError};
+use crate::{error::SnapSyncError, store::SnapStateWriter};
 use alloy_eip7928::AccountChanges;
 use alloy_primitives::{keccak256, map::B256Map, Bytes, B256, KECCAK256_EMPTY, U256};
 use alloy_rlp::Decodable;
@@ -85,16 +85,6 @@ impl BlockStateDiff {
         }
 
         diff
-    }
-
-    /// Hashed addresses whose account fields this block wrote.
-    pub(crate) fn changed_accounts(&self) -> impl Iterator<Item = B256> + '_ {
-        self.accounts.iter().map(|diff| diff.hashed_address)
-    }
-
-    /// Hashed slots this block wrote, keyed by hashed address.
-    pub(crate) const fn changed_storage(&self) -> &B256Map<B256Map<U256>> {
-        &self.storage
     }
 
     /// Merges this diff onto the state already in the database and writes the result.

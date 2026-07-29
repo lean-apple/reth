@@ -1,6 +1,6 @@
-//! Database writes for downloaded hashed state, bytecodes and trie tables.
+//! The writer boundary: session reset, write modes, and finalization.
 
-use crate::SnapSyncError;
+use crate::error::SnapSyncError;
 use alloy_primitives::{Bytes, B256};
 use reth_db_api::{
     tables,
@@ -41,6 +41,24 @@ where
     /// Creates a writer over the given provider factory.
     pub const fn new(factory: &'a F) -> Self {
         Self { factory }
+    }
+
+    /// Clears the hashed state and trie tables so a session starts from a clean generation.
+    ///
+    /// Without this a session inherits whatever was there — a genesis allocation, or the partial
+    /// state of an attempt that failed — and the final root check cannot tell the difference
+    /// between that and downloaded state.
+    pub fn reset(&self) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        {
+            let tx = provider.tx_ref();
+            tx.clear::<tables::HashedAccounts>().map_err(db_err)?;
+            tx.clear::<tables::HashedStorages>().map_err(db_err)?;
+            tx.clear::<tables::AccountsTrie>().map_err(db_err)?;
+            tx.clear::<tables::StoragesTrie>().map_err(db_err)?;
+        }
+        provider.commit().map_err(db_err)?;
+        Ok(())
     }
 
     /// Writes hashed accounts and storage slots.

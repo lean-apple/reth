@@ -8426,30 +8426,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reth-engine-snap"
-version = "2.4.1"
-dependencies = [
- "alloy-consensus",
- "alloy-eip7928",
- "alloy-eips",
- "alloy-primitives",
- "alloy-rlp",
- "alloy-trie",
- "reth-db-api",
- "reth-eth-wire-types",
- "reth-network-p2p",
- "reth-network-peers",
- "reth-primitives-traits",
- "reth-provider",
- "reth-storage-api",
- "reth-trie",
- "reth-trie-db",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "reth-engine-tree"
 version = "2.4.1"
 dependencies = [
@@ -10270,6 +10246,29 @@ dependencies = [
  "alloy-signer",
  "reth-primitives-traits",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "reth-snap-sync"
+version = "2.4.1"
+dependencies = [
+ "alloy-eip7928",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "metrics",
+ "reth-db-api",
+ "reth-eth-wire-types",
+ "reth-metrics",
+ "reth-network-p2p",
+ "reth-network-peers",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "reth-trie",
+ "reth-trie-db",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
