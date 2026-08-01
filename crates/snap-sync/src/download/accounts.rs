@@ -8,7 +8,10 @@ use crate::{
 use alloy_primitives::{Bytes, B256};
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::{AccountData, GetAccountRangeMessage};
-use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
+use reth_network_p2p::{
+    error::RequestError,
+    snap::client::{SnapClient, SnapResponse},
+};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
 use reth_trie::{TrieAccount, EMPTY_ROOT_HASH};
@@ -46,6 +49,9 @@ where
                 .await
             {
                 Ok(response) => response,
+                // Spending an attempt cannot help: the network layer rejects snap requests
+                // outright while no connected peer advertises the capability.
+                Err(RequestError::UnsupportedCapability) => return Err(SnapSyncError::NoSnapPeers),
                 Err(err) => {
                     // The request itself failed, so there is no peer response to hold against
                     // anyone; the network layer already accounts for the failure.

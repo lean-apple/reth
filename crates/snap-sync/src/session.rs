@@ -18,7 +18,10 @@ use alloy_eip7928::bal::RawBal;
 use alloy_primitives::{Bytes, B256};
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
-use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
+use reth_network_p2p::{
+    error::RequestError,
+    snap::client::{SnapClient, SnapResponse},
+};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
 use tracing::{debug, info};
@@ -98,6 +101,11 @@ where
                 self.state = SyncState::Downloading { target, covered_end: resume_from };
                 Ok(StepOutcome::TargetStale)
             }
+            DownloadStateOutcome::WaitingForPeers { resume_from } => {
+                self.metrics.waits_for_peers.increment(1);
+                self.state = SyncState::Downloading { target, covered_end: resume_from };
+                Ok(StepOutcome::WaitingForPeers)
+            }
         }
     }
 
@@ -137,7 +145,17 @@ where
         };
 
         for block in segment {
-            let bal = self.verified_bal(&block).await?;
+            let bal = match self.verified_bal(&block).await {
+                Ok(bal) => bal,
+                // The target is left where it was, so a later attempt walks this segment again
+                // and re-applies the blocks handled so far. An access list states post-block
+                // values rather than deltas, so applying one twice lands on the same state.
+                Err(SnapSyncError::NoSnapPeers) => {
+                    self.metrics.waits_for_peers.increment(1);
+                    return Ok(StepOutcome::WaitingForPeers)
+                }
+                Err(err) => return Err(err),
+            };
             let changes = decode_block_access_list(&bal, block.number)?;
             BlockStateDiff::from_changes(&changes).apply(self.writer(), Some(covered_end))?;
             self.metrics.access_lists_applied.increment(1);
@@ -176,7 +194,17 @@ where
 
         let mut applied = applied;
         for block in segment {
-            let bal = self.verified_bal(&block).await?;
+            let bal = match self.verified_bal(&block).await {
+                Ok(bal) => bal,
+                // Record the blocks that did land before waiting, so the next attempt resumes
+                // from here rather than replaying the segment from the target.
+                Err(SnapSyncError::NoSnapPeers) => {
+                    self.state = SyncState::Healing { target, applied };
+                    self.metrics.waits_for_peers.increment(1);
+                    return Ok(StepOutcome::WaitingForPeers)
+                }
+                Err(err) => return Err(err),
+            };
             let changes = decode_block_access_list(&bal, block.number)?;
             BlockStateDiff::from_changes(&changes).apply(self.writer(), None)?;
 
@@ -264,6 +292,7 @@ where
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             match self.request_bal(block).await {
                 Ok(found) => return Ok(found),
+                Err(SnapSyncError::NoSnapPeers) => return Err(SnapSyncError::NoSnapPeers),
                 Err(err) => last_error = Some(err),
             }
         }
@@ -283,8 +312,13 @@ where
                 response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
             })
             .await
-            .map_err(|err| {
-                SnapSyncError::Network(format!("snap BAL request for {}: {err}", block.hash))
+            .map_err(|err| match err {
+                // Spending an attempt cannot help: the network layer rejects snap requests
+                // outright while no connected peer advertises the capability.
+                RequestError::UnsupportedCapability => SnapSyncError::NoSnapPeers,
+                err => {
+                    SnapSyncError::Network(format!("snap BAL request for {}: {err}", block.hash))
+                }
             })?;
 
         let (peer, data) = response.split();
@@ -347,6 +381,10 @@ pub enum StepOutcome {
     Advanced,
     /// No peer serves the target's root; the target has to move before the download can resume.
     TargetStale,
+    /// No connected peer advertises `snap/2`; the step can be retried once one does.
+    ///
+    /// Progress made before the peer set ran out is recorded, so waiting costs nothing.
+    WaitingForPeers,
     /// The chain moved out from under the session, which has been reset.
     Reorged,
 }

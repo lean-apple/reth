@@ -9,7 +9,10 @@ use alloy_primitives::{
 };
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::GetByteCodesMessage;
-use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
+use reth_network_p2p::{
+    error::RequestError,
+    snap::client::{SnapClient, SnapResponse},
+};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
 
@@ -82,6 +85,9 @@ where
                 .await
             {
                 Ok(response) => response,
+                // Spending an attempt cannot help: the network layer rejects snap requests
+                // outright while no connected peer advertises the capability.
+                Err(RequestError::UnsupportedCapability) => return Err(SnapSyncError::NoSnapPeers),
                 Err(err) => {
                     last_error = Some(SnapSyncError::Network(format!(
                         "snap bytecode request failed: {err}"

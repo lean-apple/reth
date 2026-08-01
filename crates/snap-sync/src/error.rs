@@ -49,4 +49,11 @@ pub enum SnapSyncError {
     /// No peer had the block access list for a block that requires one.
     #[error("block access list not available for block {0}")]
     MissingBal(u64),
+    /// No connected peer advertises `snap/2`.
+    ///
+    /// The network layer fails snap requests immediately rather than queueing them when no
+    /// capable peer is connected, so this says nothing about the session — only that it has to
+    /// wait. Distinct from a peer that answers badly, which is worth retrying straight away.
+    #[error("no connected peer advertises snap/2")]
+    NoSnapPeers,
 }

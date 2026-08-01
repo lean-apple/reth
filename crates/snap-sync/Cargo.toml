@@ -39,6 +39,7 @@ alloy-trie.workspace = true
 reth-db-api = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 default = []

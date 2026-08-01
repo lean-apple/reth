@@ -74,12 +74,16 @@ where
         let mut cursor = starting_hash;
 
         loop {
-            let (decoded, exhausted) = match self.fetch_account_range(cursor).await? {
-                AccountRange::Unavailable => {
+            let (decoded, exhausted) = match self.fetch_account_range(cursor).await {
+                Ok(AccountRange::Unavailable) => {
                     return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
                 }
-                AccountRange::PastTheEnd => return Ok(DownloadStateOutcome::Done),
-                AccountRange::Verified { accounts, exhausted } => (accounts, exhausted),
+                Ok(AccountRange::PastTheEnd) => return Ok(DownloadStateOutcome::Done),
+                Ok(AccountRange::Verified { accounts, exhausted }) => (accounts, exhausted),
+                Err(SnapSyncError::NoSnapPeers) => {
+                    return Ok(DownloadStateOutcome::WaitingForPeers { resume_from: cursor })
+                }
+                Err(err) => return Err(err),
             };
 
             debug!(
@@ -94,8 +98,13 @@ where
                 // already durable and complete.
                 let resume_from = micro_batch[0].0;
 
-                if !self.commit_micro_batch(micro_batch).await? {
-                    return Ok(DownloadStateOutcome::Stale { resume_from })
+                match self.commit_micro_batch(micro_batch).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(DownloadStateOutcome::Stale { resume_from }),
+                    Err(SnapSyncError::NoSnapPeers) => {
+                        return Ok(DownloadStateOutcome::WaitingForPeers { resume_from })
+                    }
+                    Err(err) => return Err(err),
                 }
             }
 
@@ -172,6 +181,14 @@ pub enum DownloadStateOutcome {
         /// Account hash to resume the download from.
         resume_from: B256,
     },
+    /// No connected peer advertises `snap/2`.
+    ///
+    /// Unlike [`Self::Stale`] the target is still fine; only the peer set is. Carries the same
+    /// resume point so waiting costs nothing already downloaded.
+    WaitingForPeers {
+        /// Account hash to resume the download from.
+        resume_from: B256,
+    },
 }
 
 /// Returns the next hash after `hash`, or `None` at the end of the key space.
@@ -182,14 +199,95 @@ fn next_hash(hash: B256) -> Option<B256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_eth_wire_types::snap::{
+        GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage,
+    };
+    use reth_network_p2p::{
+        download::DownloadClient, error::PeerRequestResult, priority::Priority,
+        snap::client::SnapResponse,
+    };
+    use reth_provider::test_utils::create_test_provider_factory;
+    use std::future::{ready, Ready};
 
     fn b256(value: u64) -> B256 {
         B256::left_padding_from(&value.to_be_bytes())
+    }
+
+    /// A client standing in for a network with no `snap/2` peer connected, which fails every snap
+    /// request outright rather than queueing it.
+    #[derive(Debug)]
+    struct NoSnapPeers;
+
+    impl DownloadClient for NoSnapPeers {
+        fn report_bad_message(&self, _peer_id: reth_network_peers::PeerId) {
+            panic!("a request that never reached a peer must not blame one")
+        }
+
+        fn num_connected_peers(&self) -> usize {
+            0
+        }
+    }
+
+    impl SnapClient for NoSnapPeers {
+        type Output = Ready<PeerRequestResult<SnapResponse>>;
+
+        fn get_account_range_with_priority(
+            &self,
+            _request: GetAccountRangeMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+            self.get_storage_ranges_with_priority(request, Priority::Normal)
+        }
+
+        fn get_storage_ranges_with_priority(
+            &self,
+            _request: GetStorageRangesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+            self.get_byte_codes_with_priority(request, Priority::Normal)
+        }
+
+        fn get_byte_codes_with_priority(
+            &self,
+            _request: GetByteCodesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_block_access_lists_with_priority(
+            &self,
+            _request: reth_eth_wire_types::snap::GetBlockAccessListsMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
     }
 
     #[test]
     fn next_hash_steps_and_stops_at_the_end() {
         assert_eq!(next_hash(B256::ZERO), Some(b256(1)));
         assert_eq!(next_hash(MAX_HASH), None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_peer_set_pauses_the_download_rather_than_ending_it() {
+        let client = NoSnapPeers;
+        let factory = create_test_provider_factory();
+        let mut downloader = StateDownloader::new(&client, &factory, b256(0xabc));
+
+        // A session that starts before any snap peer connects would otherwise exhaust its retry
+        // budget instantly and report a failed sync.
+        let outcome = downloader.run(b256(7)).await.unwrap();
+
+        assert_eq!(outcome, DownloadStateOutcome::WaitingForPeers { resume_from: b256(7) });
     }
 }
