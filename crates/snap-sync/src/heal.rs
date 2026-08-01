@@ -13,20 +13,20 @@ use alloy_eip7928::AccountChanges;
 use alloy_primitives::{
     keccak256,
     map::{B256Map, B256Set},
-    Bytes, B256, KECCAK256_EMPTY, U256,
+    Bytes, B256, U256,
 };
 use alloy_rlp::Decodable;
 use reth_db_api::transaction::{DbTx, DbTxMut};
-use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
 use reth_trie::{HashedPostState, HashedStorage};
+use reth_trie_common::bal::{self, BalAccountState};
 
 /// The state changes one block's access list commits to, in hashed-key form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BlockStateDiff {
     /// Per-account field changes, keyed by `keccak256(address)`.
-    accounts: Vec<BalAccountDiff>,
+    accounts: Vec<(B256, BalAccountState)>,
     /// Post-block slot values, keyed by hashed address then hashed slot.
     storage: B256Map<B256Map<U256>>,
     /// `(code hash, code)` pairs for contracts deployed in this block.
@@ -35,56 +35,23 @@ pub(crate) struct BlockStateDiff {
 
 impl BlockStateDiff {
     /// Builds the diff for a block from its decoded access list.
-    ///
-    /// The post-block value of a field is its change with the highest block access index; entries
-    /// carry that index explicitly, so this does not rely on the peer having sorted them.
     pub(crate) fn from_changes(changes: &[AccountChanges]) -> Self {
         let mut diff = Self::default();
 
         for account in changes {
             let hashed_address = keccak256(account.address);
+            let state = BalAccountState::from_changes(account);
 
-            let balance = account
-                .balance_changes
-                .iter()
-                .max_by_key(|change| change.block_access_index)
-                .map(|change| change.post_balance);
-            let nonce = account
-                .nonce_changes
-                .iter()
-                .max_by_key(|change| change.block_access_index)
-                .map(|change| change.new_nonce);
-            let bytecode_hash =
-                account.code_changes.iter().max_by_key(|change| change.block_access_index).map(
-                    |change| {
-                        if change.new_code.is_empty() {
-                            return None
-                        }
-                        let code_hash = keccak256(&change.new_code);
-                        diff.bytecodes.push((code_hash, change.new_code.clone()));
-                        Some(code_hash)
-                    },
-                );
-
-            for slot in &account.storage_changes {
-                if let Some(change) =
-                    slot.changes.iter().max_by_key(|change| change.block_access_index)
-                {
-                    diff.storage
-                        .entry(hashed_address)
-                        .or_default()
-                        .insert(keccak256(B256::from(slot.slot)), change.new_value);
-                }
+            if let Some(code) = bal::deployed_bytecode(account) {
+                diff.bytecodes.push(code);
+            }
+            for (hashed_slot, value) in bal::hashed_storage_changes(account) {
+                diff.storage.entry(hashed_address).or_default().insert(hashed_slot, value);
             }
 
             // Accounts that were only read appear in the list with no changes at all.
-            if balance.is_some() || nonce.is_some() || bytecode_hash.is_some() {
-                diff.accounts.push(BalAccountDiff {
-                    hashed_address,
-                    balance,
-                    nonce,
-                    bytecode_hash,
-                });
+            if !state.is_empty() {
+                diff.accounts.push((hashed_address, state));
             }
         }
 
@@ -112,18 +79,23 @@ impl BlockStateDiff {
 
         let mut accounts = B256Map::default();
         let mut deleted = B256Set::default();
-        for diff in self.accounts.iter().filter(|diff| within(&diff.hashed_address)) {
-            let existing = writer.read_account(diff.hashed_address)?;
-            let merged = diff.merge_onto(existing.as_ref());
+        for (hashed_address, state) in self.accounts.iter().filter(|(address, _)| within(address)) {
+            // The stored account only matters for fields this block left untouched.
+            let existing = if state.needs_parent_account() {
+                writer.read_account(*hashed_address)?
+            } else {
+                None
+            };
+            let merged = state.merge_onto(existing.as_ref());
 
             // An account left with no balance, no nonce and no code does not exist under
             // EIP-161, so it has to be removed rather than written as an empty leaf. Storing one
             // would put a node in the trie that the block's state root does not account for.
             if merged.is_empty() {
-                deleted.insert(diff.hashed_address);
-                accounts.insert(diff.hashed_address, None);
+                deleted.insert(*hashed_address);
+                accounts.insert(*hashed_address, None);
             } else {
-                accounts.insert(diff.hashed_address, Some(merged));
+                accounts.insert(*hashed_address, Some(merged));
             }
         }
 
@@ -165,41 +137,6 @@ pub(crate) fn decode_block_access_list(
     })
 }
 
-/// One account's field changes within a block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BalAccountDiff {
-    /// `keccak256(address)`.
-    hashed_address: B256,
-    /// Post-block balance, when the block changed it.
-    balance: Option<U256>,
-    /// Post-block nonce, when the block changed it.
-    nonce: Option<u64>,
-    /// Post-block code hash, when the block changed it. The inner `None` means code was cleared.
-    bytecode_hash: Option<Option<B256>>,
-}
-
-impl BalAccountDiff {
-    /// Applies the changed fields on top of the account currently in the database.
-    ///
-    /// A field the block did not touch keeps its stored value, which is why this cannot be a plain
-    /// overwrite: a BAL entry that only changes a balance says nothing about the nonce.
-    fn merge_onto(&self, existing: Option<&Account>) -> Account {
-        Account {
-            balance: self
-                .balance
-                .or_else(|| existing.map(|account| account.balance))
-                .unwrap_or_default(),
-            nonce: self.nonce.or_else(|| existing.map(|account| account.nonce)).unwrap_or_default(),
-            bytecode_hash: match self.bytecode_hash {
-                // The database stores "no code" as `None`, so normalise the empty-code hash.
-                Some(Some(hash)) if hash != KECCAK256_EMPTY => Some(hash),
-                Some(_) => None,
-                None => existing.and_then(|account| account.bytecode_hash),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,8 +162,9 @@ mod tests {
         let diff = BlockStateDiff::from_changes(&[changes]);
 
         assert_eq!(diff.accounts.len(), 1);
-        assert_eq!(diff.accounts[0].balance, Some(U256::from(30)));
-        assert_eq!(diff.accounts[0].nonce, Some(7));
+        assert_eq!(diff.accounts[0].0, keccak256(address));
+        assert_eq!(diff.accounts[0].1.balance, Some(U256::from(30)));
+        assert_eq!(diff.accounts[0].1.nonce, Some(7));
     }
 
     #[test]
@@ -257,7 +195,7 @@ mod tests {
         let diff = BlockStateDiff::from_changes(&[changes]);
 
         assert_eq!(diff.bytecodes, vec![(keccak256(&code), code.clone())]);
-        assert_eq!(diff.accounts[0].bytecode_hash, Some(Some(keccak256(&code))));
+        assert_eq!(diff.accounts[0].1.code_hash, Some(Some(keccak256(&code))));
     }
 
     #[test]
@@ -269,65 +207,6 @@ mod tests {
 
         assert!(diff.accounts.is_empty());
         assert!(diff.storage.is_empty());
-    }
-
-    #[test]
-    fn untouched_fields_keep_their_stored_values() {
-        let existing =
-            Account { nonce: 4, balance: U256::from(9), bytecode_hash: Some(B256::repeat_byte(1)) };
-        let diff = BalAccountDiff {
-            hashed_address: B256::ZERO,
-            balance: Some(U256::from(99)),
-            nonce: None,
-            bytecode_hash: None,
-        };
-
-        let merged = diff.merge_onto(Some(&existing));
-
-        assert_eq!(merged.balance, U256::from(99));
-        assert_eq!(merged.nonce, 4);
-        assert_eq!(merged.bytecode_hash, existing.bytecode_hash);
-    }
-
-    #[test]
-    fn new_accounts_default_their_untouched_fields() {
-        let diff = BalAccountDiff {
-            hashed_address: B256::ZERO,
-            balance: Some(U256::from(1)),
-            nonce: None,
-            bytecode_hash: None,
-        };
-
-        let merged = diff.merge_onto(None);
-
-        assert_eq!(merged.nonce, 0);
-        assert_eq!(merged.bytecode_hash, None);
-    }
-
-    #[test]
-    fn cleared_code_is_stored_as_no_code() {
-        let existing =
-            Account { nonce: 1, balance: U256::ZERO, bytecode_hash: Some(B256::repeat_byte(2)) };
-        let diff = BalAccountDiff {
-            hashed_address: B256::ZERO,
-            balance: None,
-            nonce: None,
-            bytecode_hash: Some(None),
-        };
-
-        assert_eq!(diff.merge_onto(Some(&existing)).bytecode_hash, None);
-    }
-
-    #[test]
-    fn empty_code_hash_normalises_to_no_code() {
-        let diff = BalAccountDiff {
-            hashed_address: B256::ZERO,
-            balance: None,
-            nonce: None,
-            bytecode_hash: Some(Some(KECCAK256_EMPTY)),
-        };
-
-        assert_eq!(diff.merge_onto(None).bytecode_hash, None);
     }
 
     #[test]

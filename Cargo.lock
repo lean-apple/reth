@@ -10267,6 +10267,7 @@ dependencies = [
  "reth-stages-types",
  "reth-storage-api",
  "reth-trie",
+ "reth-trie-common",
  "reth-trie-db",
  "thiserror 2.0.18",
  "tokio",
@@ -10696,6 +10697,7 @@ name = "reth-trie-common"
 version = "2.4.1"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",

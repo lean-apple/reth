@@ -24,6 +24,7 @@ reth-provider.workspace = true
 reth-stages-types.workspace = true
 reth-storage-api.workspace = true
 reth-trie.workspace = true
+reth-trie-common = { workspace = true, features = ["eip7928"] }
 reth-trie-db.workspace = true
 
 # alloy
@@ -52,4 +53,5 @@ test-utils = [
     "reth-trie/test-utils",
     "reth-trie-db/test-utils",
     "reth-stages-types/test-utils",
+    "reth-trie-common/test-utils",
 ]
