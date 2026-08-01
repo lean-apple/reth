@@ -60,8 +60,17 @@ where
     ///
     /// The marker goes in the same transaction as the clear, so there is no instant at which the
     /// tables are wiped without something on disk saying so.
-    pub fn begin_generation(&self, target_block: u64) -> Result<(), SnapSyncError> {
+    ///
+    /// Fails on the legacy plain-state layout before touching anything: its state providers read
+    /// plain tables, which snap data — hashed keys with no preimages — can never fill.
+    pub fn begin_generation(&self, target_block: u64) -> Result<(), SnapSyncError>
+    where
+        F::ProviderRW: StorageSettingsCache,
+    {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        if !provider.cached_storage_settings().use_hashed_state() {
+            return Err(SnapSyncError::UnsupportedStorageLayout)
+        }
         {
             let tx = provider.tx_ref();
             tx.clear::<tables::HashedAccounts>().map_err(db_err)?;
@@ -335,8 +344,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_plain_state_layout_is_refused_before_the_wipe() {
+        let factory = create_test_provider_factory();
+        let writer = SnapStateWriter::new(&factory);
+        let (state, _) = fixture();
+        writer.write_state(state).unwrap();
+
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v1());
+
+        // Refusing after the wipe would destroy a v1 node's hashed tables for nothing.
+        assert!(matches!(writer.begin_generation(1), Err(SnapSyncError::UnsupportedStorageLayout)));
+        let provider = factory.database_provider_ro().unwrap();
+        let mut cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>().unwrap();
+        assert!(cursor.first().unwrap().is_some(), "existing state must be left untouched");
+    }
+
+    #[test]
     fn an_unverified_generation_is_marked_on_disk() {
         let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v2());
         let writer = SnapStateWriter::new(&factory);
         let (state, root) = fixture();
 
@@ -353,6 +379,7 @@ mod tests {
     #[test]
     fn a_rejected_generation_stays_marked() {
         let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v2());
         let writer = SnapStateWriter::new(&factory);
         let (state, _) = fixture();
 

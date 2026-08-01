@@ -49,6 +49,12 @@ pub enum SnapSyncError {
     /// No peer had the block access list for a block that requires one.
     #[error("block access list not available for block {0}")]
     MissingBal(u64),
+    /// The database uses the legacy plain-state layout, which snap sync cannot populate.
+    ///
+    /// Snap responses are keyed by hashed address with no preimage, so only a layout that reads
+    /// state from the hashed tables can be assembled from them.
+    #[error("snap sync requires the v2 storage layout (hashed state as canonical state)")]
+    UnsupportedStorageLayout,
     /// No connected peer advertises `snap/2`.
     ///
     /// The network layer fails snap requests immediately rather than queueing them when no
