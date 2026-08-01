@@ -865,4 +865,50 @@ mod tests {
         assert_eq!(msg.starting_hash.unwrap_or(B256::ZERO), B256::ZERO);
         assert_eq!(msg.limit_hash.unwrap_or(B256::repeat_byte(0xff)), B256::repeat_byte(0xff));
     }
+
+    fn trie_account(storage_root: B256, code_hash: B256) -> TrieAccount {
+        TrieAccount { nonce: 7, balance: U256::from(42), storage_root, code_hash }
+    }
+
+    #[test]
+    fn slim_body_elides_empty_storage_and_code() {
+        let account = trie_account(EMPTY_ROOT_HASH, KECCAK256_EMPTY);
+        let encoded = AccountData::from_trie_account(B256::repeat_byte(1), &account);
+
+        let body = SlimAccountBody::decode(&mut encoded.body.as_ref()).unwrap();
+        assert!(body.storage_root.is_empty());
+        assert!(body.code_hash.is_empty());
+        assert_eq!(encoded.trie_account().unwrap(), account);
+    }
+
+    #[test]
+    fn slim_body_keeps_non_default_storage_and_code() {
+        let account = trie_account(B256::repeat_byte(2), B256::repeat_byte(3));
+        let encoded = AccountData::from_trie_account(B256::repeat_byte(1), &account);
+
+        let body = SlimAccountBody::decode(&mut encoded.body.as_ref()).unwrap();
+        assert_eq!(body.storage_root.len(), 32);
+        assert_eq!(body.code_hash.len(), 32);
+        assert_eq!(encoded.trie_account().unwrap(), account);
+    }
+
+    #[test]
+    fn slim_body_rejects_field_lengths_the_encoding_never_produces() {
+        // A 16-byte field is neither an elided default nor a hash, so accepting it would let a
+        // peer smuggle a value that hashes differently than the one it claims to serve.
+        let truncated = Bytes::from_static(&[0xaa; 16]);
+
+        assert!(SlimAccountBody::restore(&truncated, EMPTY_ROOT_HASH).is_err());
+    }
+
+    #[test]
+    fn storage_data_carries_the_trie_leaf_encoding() {
+        let value = U256::from(1234);
+        let slot = StorageData::from_value(B256::repeat_byte(4), value);
+
+        // Clients verify range proofs against the RLP-encoded trie leaf, so the wire bytes must be
+        // exactly that rather than a fixed-width word.
+        assert_eq!(slot.data.as_ref(), alloy_rlp::encode(value));
+        assert_eq!(slot.value().unwrap(), value);
+    }
 }
