@@ -146,10 +146,10 @@ impl BlockStateDiff {
             storages.entry(address).or_insert_with(|| HashedStorage::new(true));
         }
 
-        writer.write_state(HashedPostState { accounts, storages })?;
-        if !self.bytecodes.is_empty() {
-            writer.write_bytecodes(&self.bytecodes)?;
-        }
+        // One transaction for state and code together: a crash between the two would leave an
+        // account's code hash pointing at bytecode the database does not have, which the final
+        // root check cannot catch because code lives outside the trie.
+        writer.commit_batch(HashedPostState { accounts, storages }, &self.bytecodes)?;
 
         Ok(())
     }
