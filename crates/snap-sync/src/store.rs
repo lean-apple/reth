@@ -1,4 +1,4 @@
-//! The writer boundary: session reset, write modes, and finalization.
+//! The writer boundary: generation lifecycle, write modes, and finalization.
 
 use crate::error::SnapSyncError;
 use alloy_primitives::{Bytes, B256};
@@ -8,9 +8,17 @@ use reth_db_api::{
 };
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::DatabaseProviderFactory;
+use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
 use reth_trie::{HashedPostState, StateRoot, StateRootProgress};
 use reth_trie_db::DatabaseStateRoot;
+
+/// Stage slot marking a snap sync generation whose state root has not been checked yet.
+///
+/// A generation starts by wiping the hashed state, so a crash part-way leaves tables that look
+/// like a healthy node's while holding a partial download. This is present exactly while that is
+/// the case.
+const SNAP_SYNC_STAGE: StageId = StageId::Other("SnapSync");
 
 /// Persists verified snap state to the database.
 ///
@@ -43,12 +51,16 @@ where
         Self { factory }
     }
 
-    /// Clears the hashed state and trie tables so a session starts from a clean generation.
+    /// Clears the hashed state and trie tables so a session starts from a clean generation, and
+    /// records that the state left behind is not yet verified.
     ///
-    /// Without this a session inherits whatever was there — a genesis allocation, or the partial
-    /// state of an attempt that failed — and the final root check cannot tell the difference
-    /// between that and downloaded state.
-    pub fn reset(&self) -> Result<(), SnapSyncError> {
+    /// Without the clear a session inherits whatever was there — a genesis allocation, or the
+    /// partial state of an attempt that failed — and the final root check cannot tell the
+    /// difference between that and downloaded state.
+    ///
+    /// The marker goes in the same transaction as the clear, so there is no instant at which the
+    /// tables are wiped without something on disk saying so.
+    pub fn begin_generation(&self, target_block: u64) -> Result<(), SnapSyncError> {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
         {
             let tx = provider.tx_ref();
@@ -56,6 +68,11 @@ where
             tx.clear::<tables::HashedStorages>().map_err(db_err)?;
             tx.clear::<tables::AccountsTrie>().map_err(db_err)?;
             tx.clear::<tables::StoragesTrie>().map_err(db_err)?;
+            tx.put::<tables::StageCheckpoints>(
+                SNAP_SYNC_STAGE.to_string(),
+                StageCheckpoint::new(target_block),
+            )
+            .map_err(db_err)?;
         }
         provider.commit().map_err(db_err)?;
         Ok(())
@@ -126,6 +143,20 @@ where
         let provider = self.factory.database_provider_ro().map_err(db_err)?;
         provider.tx_ref().get::<tables::HashedAccounts>(hashed_address).map_err(db_err)
     }
+
+    /// Returns the target block of a generation that was interrupted before it was verified.
+    ///
+    /// `Some` means the hashed state on disk is a partial download and must not be read as though
+    /// it were a synced node's state.
+    pub fn interrupted_generation(&self) -> Result<Option<u64>, SnapSyncError> {
+        let provider = self.factory.database_provider_ro().map_err(db_err)?;
+        let checkpoint = provider
+            .tx_ref()
+            .get::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string())
+            .map_err(db_err)?;
+
+        Ok(checkpoint.map(|checkpoint| checkpoint.block_number))
+    }
 }
 
 impl<F> SnapStateWriter<'_, F>
@@ -192,6 +223,12 @@ where
             return Err(SnapSyncError::StateRootMismatch { block: block_number, expected, computed })
         }
 
+        // Cleared in the same transaction as the nodes that make the state usable, so the marker
+        // outlives every state the root check has not vouched for.
+        provider
+            .tx_ref()
+            .delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
+            .map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -295,6 +332,36 @@ mod tests {
         }
         // A rejected sync must not leave a half-built trie behind for the next attempt.
         assert!(trie_is_empty(&factory));
+    }
+
+    #[test]
+    fn an_unverified_generation_is_marked_on_disk() {
+        let factory = create_test_provider_factory();
+        let writer = SnapStateWriter::new(&factory);
+        let (state, root) = fixture();
+
+        writer.begin_generation(4242).unwrap();
+        // Everything between here and the root check is a partial download.
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(4242));
+
+        writer.write_state(state).unwrap();
+        writer.finalize_sync(4242, root).unwrap();
+
+        assert_eq!(writer.interrupted_generation().unwrap(), None);
+    }
+
+    #[test]
+    fn a_rejected_generation_stays_marked() {
+        let factory = create_test_provider_factory();
+        let writer = SnapStateWriter::new(&factory);
+        let (state, _) = fixture();
+
+        writer.begin_generation(4242).unwrap();
+        writer.write_state(state).unwrap();
+        writer.finalize_sync(4242, b256(0xdead)).unwrap_err();
+
+        // The state is still a partial download, so a restart must not trust it.
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(4242));
     }
 
     #[test]

@@ -21,6 +21,7 @@ reth-metrics.workspace = true
 reth-network-peers.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
+reth-stages-types.workspace = true
 reth-storage-api.workspace = true
 reth-trie.workspace = true
 reth-trie-db.workspace = true
@@ -50,4 +51,5 @@ test-utils = [
     "reth-provider/test-utils",
     "reth-trie/test-utils",
     "reth-trie-db/test-utils",
+    "reth-stages-types/test-utils",
 ]

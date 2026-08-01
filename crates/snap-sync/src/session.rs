@@ -74,7 +74,7 @@ where
             .await
             .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
 
-        self.writer().reset()?;
+        self.writer().begin_generation(target.number)?;
         self.state = SyncState::Downloading { target, covered_end: B256::ZERO };
 
         info!(target: "snap", number = target.number, hash = %target.hash, "Started snap sync");
