@@ -9,7 +9,7 @@ use reth_db_api::{
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
-use reth_trie::{HashedPostState, StateRoot};
+use reth_trie::{HashedPostState, StateRoot, StateRootProgress};
 use reth_trie_db::DatabaseStateRoot;
 
 /// Persists verified snap state to the database.
@@ -142,23 +142,56 @@ where
     /// out gaps between ranges served at different pivots, or a block access list applied wrongly.
     ///
     /// The same pass produces the intermediate trie nodes, which are written on success because
-    /// the node cannot serve proofs or extend the chain from hashed state alone. Walking the whole
-    /// trie is proportional to total state size, so this runs once at the end of a sync.
+    /// the node cannot serve proofs or extend the chain from hashed state alone.
+    ///
+    /// The walk is chunked so peak memory does not scale with total state size. All chunks share
+    /// one transaction, committed only once the root matches.
     pub fn finalize_sync(&self, block_number: u64, expected: B256) -> Result<(), SnapSyncError> {
+        self.finalize_sync_chunked(block_number, expected, None)
+    }
+
+    /// [`Self::finalize_sync`], with an explicit number of hashed entries per chunk.
+    ///
+    /// `None` keeps the trie crate's default. Only the chunk size varies: the root, the written
+    /// nodes and the all-or-nothing commit are identical whatever it is.
+    fn finalize_sync_chunked(
+        &self,
+        block_number: u64,
+        expected: B256,
+        entries_per_chunk: Option<u64>,
+    ) -> Result<(), SnapSyncError> {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
 
-        let (computed, updates) = reth_trie_db::with_adapter!(provider, |A| {
-            DbStateRoot::<_, A>::from_tx(provider.tx_ref()).root_with_updates()
-        })
-        .map_err(|err| SnapSyncError::Database(format!("state root computation: {err}")))?;
+        let mut intermediate = None;
+        let computed = loop {
+            let progress = reth_trie_db::with_adapter!(provider, |A| {
+                let mut state_root = DbStateRoot::<_, A>::from_tx(provider.tx_ref())
+                    .with_intermediate_state(intermediate.take());
+                if let Some(entries) = entries_per_chunk {
+                    state_root = state_root.with_threshold(entries);
+                }
+                state_root.root_with_progress()
+            })
+            .map_err(|err| SnapSyncError::Database(format!("state root computation: {err}")))?;
+
+            match progress {
+                StateRootProgress::Progress(state, _, updates) => {
+                    provider.write_trie_updates(updates).map_err(db_err)?;
+                    intermediate = Some(*state);
+                }
+                StateRootProgress::Complete(root, _, updates) => {
+                    provider.write_trie_updates(updates).map_err(db_err)?;
+                    break root
+                }
+            }
+        };
 
         if computed != expected {
-            // Dropping the provider without committing leaves the trie tables untouched, so a
+            // Dropping the provider without committing discards every chunk written above, so a
             // retry at a later pivot starts from the hashed state rather than a half-built trie.
             return Err(SnapSyncError::StateRootMismatch { block: block_number, expected, computed })
         }
 
-        provider.write_trie_updates(updates).map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -261,6 +294,34 @@ mod tests {
             other => panic!("expected a state root mismatch, got {other:?}"),
         }
         // A rejected sync must not leave a half-built trie behind for the next attempt.
+        assert!(trie_is_empty(&factory));
+    }
+
+    #[test]
+    fn chunked_walk_reaches_the_same_root_as_a_single_pass() {
+        let factory = create_test_provider_factory();
+        let (state, root) = fixture();
+        let writer = SnapStateWriter::new(&factory);
+        writer.write_state(state).unwrap();
+
+        // One entry per chunk, so the walk resumes from an intermediate state many times over.
+        writer.finalize_sync_chunked(100, root, Some(1)).unwrap();
+
+        assert!(!trie_is_empty(&factory));
+    }
+
+    #[test]
+    fn a_chunked_walk_that_mismatches_writes_nothing() {
+        let factory = create_test_provider_factory();
+        let (state, _) = fixture();
+        let writer = SnapStateWriter::new(&factory);
+        writer.write_state(state).unwrap();
+
+        // Chunks are written as the walk goes, so the mismatch has to discard the earlier ones too.
+        assert!(matches!(
+            writer.finalize_sync_chunked(100, b256(0xdead), Some(1)),
+            Err(SnapSyncError::StateRootMismatch { .. })
+        ));
         assert!(trie_is_empty(&factory));
     }
 
