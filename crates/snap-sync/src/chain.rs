@@ -8,7 +8,7 @@
 //! reorg, and resolving a pivot, header or access list by number is exactly how a session ends up
 //! mixing two chains together.
 
-use alloy_primitives::{BlockNumber, Bytes, B256};
+use alloy_primitives::{BlockNumber, B256};
 use std::future::Future;
 
 /// A block identified by hash, with the height and links a session needs to order and connect it.
@@ -61,12 +61,6 @@ pub trait CanonicalChainSource: Send + Sync {
         ancestor: B256,
         head: B256,
     ) -> impl Future<Output = Result<Vec<BlockRef>, ChainError>> + Send;
-
-    /// Returns the block access list a payload carried, when one is cached for `hash`.
-    ///
-    /// Only an optimization: a session falls back to requesting the list from peers, and verifies
-    /// it against the header commitment either way.
-    fn cached_bal(&self, hash: B256) -> Option<Bytes>;
 }
 
 /// Why the canonical chain could not answer.

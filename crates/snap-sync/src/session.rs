@@ -23,7 +23,7 @@ use reth_network_p2p::{
     snap::client::{SnapClient, SnapResponse},
 };
 use reth_provider::DatabaseProviderFactory;
-use reth_storage_api::{DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
+use reth_storage_api::{BalStoreHandle, DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
 use tracing::{debug, info};
 
 /// Drives one snap sync from a clean state generation to a verified state root.
@@ -35,6 +35,11 @@ pub struct SnapSyncSession<C, F, H> {
     factory: F,
     /// Where canonicality comes from.
     chain: H,
+    /// Access lists the node already holds, shared with the rest of the node.
+    ///
+    /// Only an optimization: a session falls back to requesting a list from peers, and verifies
+    /// it against the header commitment either way.
+    bal_store: BalStoreHandle,
     /// Where the session currently is.
     state: SyncState,
     /// Progress counters for this session.
@@ -52,8 +57,15 @@ where
     H: CanonicalChainSource,
 {
     /// Creates an idle session.
-    pub fn new(client: C, factory: F, chain: H) -> Self {
-        Self { client, factory, chain, state: SyncState::Idle, metrics: SnapSyncMetrics::default() }
+    pub fn new(client: C, factory: F, chain: H, bal_store: BalStoreHandle) -> Self {
+        Self {
+            client,
+            factory,
+            chain,
+            bal_store,
+            state: SyncState::Idle,
+            metrics: SnapSyncMetrics::default(),
+        }
     }
 
     /// Returns what the session is currently doing.
@@ -263,8 +275,14 @@ where
     async fn verified_bal(&self, block: &BlockRef) -> Result<Bytes, SnapSyncError> {
         let expected = block.bal_hash.ok_or(SnapSyncError::MissingBal(block.number))?;
 
-        let (peer, bal) = match self.chain.cached_bal(block.hash) {
-            // Cached from the payload, so there is no peer to hold to account.
+        let cached = self
+            .bal_store
+            .get_by_hashes(core::slice::from_ref(&block.hash))
+            .ok()
+            .and_then(|mut found| found.pop().flatten());
+
+        let (peer, bal) = match cached {
+            // Already held by the node, so there is no peer to hold to account.
             Some(bal) => (None, bal),
             None => {
                 let (peer, bal) = self.fetch_bal(block).await?;
