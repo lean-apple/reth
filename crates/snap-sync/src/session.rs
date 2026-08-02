@@ -183,6 +183,12 @@ where
             self.metrics.access_lists_applied.increment(1);
         }
 
+        self.writer().update_generation(SnapGeneration {
+            target_block: new_target.number,
+            target_hash: new_target.hash,
+            state_root: new_target.state_root,
+        })?;
+
         info!(
             target: "snap",
             from = target.number,
@@ -261,6 +267,10 @@ where
         if self.chain.canonical_token() != token {
             self.ensure_canonical(applied).await?;
         }
+
+        // Only now is the state known to be both verified and still canonical. Once an
+        // engine-side handoff exists, this clear belongs in its completion transaction instead.
+        self.writer().complete_generation()?;
 
         self.state = SyncState::Complete { at: applied };
 

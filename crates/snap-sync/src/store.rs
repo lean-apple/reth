@@ -108,6 +108,48 @@ where
         Ok(())
     }
 
+    /// Rewrites the generation marker for a target the session moved to.
+    ///
+    /// The rolling transition changes which block the partial state is converging on; the marker
+    /// has to follow, or a restart would blame the wrong block for the state on disk. Leaves the
+    /// tables alone: the downloaded prefix is exactly what the transition carries over.
+    pub fn update_generation(&self, generation: SnapGeneration) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        {
+            let tx = provider.tx_ref();
+            tx.put::<tables::StageCheckpoints>(
+                SNAP_SYNC_STAGE.to_string(),
+                StageCheckpoint::new(generation.target_block),
+            )
+            .map_err(db_err)?;
+            tx.put::<tables::StageCheckpointProgresses>(
+                SNAP_SYNC_STAGE.to_string(),
+                alloy_rlp::encode(generation),
+            )
+            .map_err(db_err)?;
+        }
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Clears the generation marker: the assembled state has been accepted as this node's state.
+    ///
+    /// Split from [`finalize_sync`](Self::finalize_sync) because a matching root is not
+    /// acceptance: the block can be orphaned while the trie is being walked, and the marker must
+    /// outlive every state the node has not committed to building on.
+    pub fn complete_generation(&self) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        {
+            let tx = provider.tx_ref();
+            tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
+                .map_err(db_err)?;
+            tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
+                .map_err(db_err)?;
+        }
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
+
     /// Writes hashed state and the bytecodes it references in a single transaction.
     ///
     /// One transaction is what makes a downloaded batch all-or-nothing: an account is never
@@ -258,16 +300,9 @@ where
             return Err(SnapSyncError::StateRootMismatch { block: block_number, expected, computed })
         }
 
-        // Cleared in the same transaction as the nodes that make the state usable, so the marker
-        // outlives every state the root check has not vouched for.
-        provider
-            .tx_ref()
-            .delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
-            .map_err(db_err)?;
-        provider
-            .tx_ref()
-            .delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
-            .map_err(db_err)?;
+        // The generation marker is deliberately left in place: a matching root proves the state
+        // is block `block_number`'s, not that the node accepted it — the block can have been
+        // orphaned while the trie was being walked.
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -408,12 +443,17 @@ mod tests {
         let (state, root) = fixture();
 
         writer.begin_generation(generation(4242)).unwrap();
-        // Everything between here and the root check is a partial download.
+        // Everything between here and acceptance is not this node's state yet.
         assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
 
         writer.write_state(state).unwrap();
         writer.finalize_sync(4242, root).unwrap();
 
+        // A matching root is not acceptance: the block can be orphaned during the trie walk, so
+        // only the explicit completion clears the marker.
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
+
+        writer.complete_generation().unwrap();
         assert_eq!(writer.interrupted_generation().unwrap(), None);
     }
 
@@ -430,6 +470,25 @@ mod tests {
 
         // The state is still a partial download, so a restart must not trust it.
         assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
+    }
+
+    #[test]
+    fn a_moved_target_rewrites_the_marker_in_place() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v2());
+        let writer = SnapStateWriter::new(&factory);
+        let (state, _) = fixture();
+
+        writer.begin_generation(generation(7)).unwrap();
+        writer.write_state(state).unwrap();
+
+        writer.update_generation(generation(9)).unwrap();
+
+        // The marker follows the rolling target; the downloaded prefix stays.
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(9)));
+        let provider = factory.database_provider_ro().unwrap();
+        let mut cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>().unwrap();
+        assert!(cursor.first().unwrap().is_some());
     }
 
     #[test]
