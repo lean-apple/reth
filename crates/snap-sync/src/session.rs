@@ -15,6 +15,7 @@ use crate::{
     MAX_REQUEST_ATTEMPTS, PIVOT_OFFSET, SNAP_RESPONSE_BYTES_LIMIT,
 };
 use alloy_eip7928::bal::RawBal;
+use alloy_eips::NumHash;
 use alloy_primitives::{Bytes, B256};
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
@@ -315,6 +316,17 @@ where
                 self.client.report_bad_message(peer);
             }
             return Err(SnapSyncError::BalVerification { block: block.number, expected })
+        }
+
+        // A list fetched from a peer is now as trustworthy as one a payload carried, so share it
+        // through the same store instead of fetching it again on the next pass. Best-effort: the
+        // list in hand is what matters.
+        if peer.is_some() &&
+            let Err(err) = self
+                .bal_store
+                .insert(NumHash::new(block.number, block.hash), RawBal::new(bal.clone()))
+        {
+            debug!(target: "snap", %err, number = block.number, "Failed to cache fetched BAL");
         }
 
         Ok(bal)
