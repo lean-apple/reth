@@ -24,6 +24,7 @@ use reth_network_p2p::{
 };
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{BalStoreHandle, DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
 /// Drives one snap sync from a clean state generation to a verified state root.
@@ -44,6 +45,10 @@ pub struct SnapSyncSession<C, F, H> {
     state: SyncState,
     /// Progress counters for this session.
     metrics: SnapSyncMetrics,
+    /// Monotonic counter correlating this session's own requests with responses.
+    ///
+    /// Atomic only because requests are issued through `&self`; the session itself is serial.
+    request_id: AtomicU64,
 }
 
 impl<C, F, H> SnapSyncSession<C, F, H>
@@ -65,6 +70,7 @@ where
             bal_store,
             state: SyncState::Idle,
             metrics: SnapSyncMetrics::default(),
+            request_id: AtomicU64::new(0),
         }
     }
 
@@ -329,7 +335,7 @@ where
         let response = self
             .client
             .get_block_access_lists(GetBlockAccessListsMessage {
-                request_id: 0,
+                request_id: self.request_id.fetch_add(1, Ordering::Relaxed),
                 block_hashes: vec![block.hash],
                 response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
             })
