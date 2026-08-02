@@ -11,7 +11,7 @@ use crate::{
     error::SnapSyncError,
     heal::{decode_block_access_list, BlockStateDiff},
     metrics::SnapSyncMetrics,
-    store::SnapStateWriter,
+    store::{SnapGeneration, SnapStateWriter},
     MAX_REQUEST_ATTEMPTS, PIVOT_OFFSET, SNAP_RESPONSE_BYTES_LIMIT,
 };
 use alloy_eip7928::bal::RawBal;
@@ -86,7 +86,11 @@ where
             .await
             .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
 
-        self.writer().begin_generation(target.number)?;
+        self.writer().begin_generation(SnapGeneration {
+            target_block: target.number,
+            target_hash: target.hash,
+            state_root: target.state_root,
+        })?;
         self.state = SyncState::Downloading { target, covered_end: B256::ZERO };
 
         info!(target: "snap", number = target.number, hash = %target.hash, "Started snap sync");

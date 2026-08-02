@@ -41,7 +41,7 @@ pub use chain::{BlockRef, CanonicalChainSource, ChainError};
 pub use download::{DownloadStateOutcome, StateDownloader};
 pub use error::SnapSyncError;
 pub use session::{SnapSyncSession, StepOutcome, SyncState};
-pub use store::SnapStateWriter;
+pub use store::{SnapGeneration, SnapStateWriter};
 
 /// How many blocks behind the canonical head a sync target is placed.
 ///

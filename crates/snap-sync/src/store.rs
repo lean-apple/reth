@@ -20,6 +20,20 @@ use reth_trie_db::DatabaseStateRoot;
 /// the case.
 const SNAP_SYNC_STAGE: StageId = StageId::Other("SnapSync");
 
+/// What a snap sync generation was building toward, persisted while it is unverified.
+///
+/// The hash and root make the marker self-describing: on restart the node can tell which block
+/// the partial state belongs to without trusting heights across a reorg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
+pub struct SnapGeneration {
+    /// Height of the target block, matching the stage checkpoint row.
+    pub target_block: u64,
+    /// Hash of the target block. The identity of the generation.
+    pub target_hash: B256,
+    /// State root the generation is assembling toward.
+    pub state_root: B256,
+}
+
 /// Persists verified snap state to the database.
 ///
 /// Each write commits on its own: a batch is only durable once it has been checked against the
@@ -63,7 +77,7 @@ where
     ///
     /// Fails on the legacy plain-state layout before touching anything: its state providers read
     /// plain tables, which snap data — hashed keys with no preimages — can never fill.
-    pub fn begin_generation(&self, target_block: u64) -> Result<(), SnapSyncError>
+    pub fn begin_generation(&self, generation: SnapGeneration) -> Result<(), SnapSyncError>
     where
         F::ProviderRW: StorageSettingsCache,
     {
@@ -77,9 +91,16 @@ where
             tx.clear::<tables::HashedStorages>().map_err(db_err)?;
             tx.clear::<tables::AccountsTrie>().map_err(db_err)?;
             tx.clear::<tables::StoragesTrie>().map_err(db_err)?;
+            // The checkpoint row keeps the marker visible to standard stage tooling; the progress
+            // blob carries what a height alone cannot say.
             tx.put::<tables::StageCheckpoints>(
                 SNAP_SYNC_STAGE.to_string(),
-                StageCheckpoint::new(target_block),
+                StageCheckpoint::new(generation.target_block),
+            )
+            .map_err(db_err)?;
+            tx.put::<tables::StageCheckpointProgresses>(
+                SNAP_SYNC_STAGE.to_string(),
+                alloy_rlp::encode(generation),
             )
             .map_err(db_err)?;
         }
@@ -153,18 +174,23 @@ where
         provider.tx_ref().get::<tables::HashedAccounts>(hashed_address).map_err(db_err)
     }
 
-    /// Returns the target block of a generation that was interrupted before it was verified.
+    /// Returns the generation that was interrupted before it was verified.
     ///
     /// `Some` means the hashed state on disk is a partial download and must not be read as though
     /// it were a synced node's state.
-    pub fn interrupted_generation(&self) -> Result<Option<u64>, SnapSyncError> {
+    pub fn interrupted_generation(&self) -> Result<Option<SnapGeneration>, SnapSyncError> {
         let provider = self.factory.database_provider_ro().map_err(db_err)?;
-        let checkpoint = provider
+        let Some(blob) = provider
             .tx_ref()
-            .get::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string())
-            .map_err(db_err)?;
+            .get::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string())
+            .map_err(db_err)?
+        else {
+            return Ok(None)
+        };
 
-        Ok(checkpoint.map(|checkpoint| checkpoint.block_number))
+        alloy_rlp::Decodable::decode(&mut blob.as_slice())
+            .map(Some)
+            .map_err(|err| SnapSyncError::Database(format!("snap generation marker: {err}")))
     }
 }
 
@@ -238,6 +264,10 @@ where
             .tx_ref()
             .delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
             .map_err(db_err)?;
+        provider
+            .tx_ref()
+            .delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
+            .map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -281,6 +311,14 @@ mod tests {
     }
 
     /// A trie-sized set of accounts, one of them with storage, plus the state root they hash to.
+    fn generation(target_block: u64) -> SnapGeneration {
+        SnapGeneration {
+            target_block,
+            target_hash: b256(target_block),
+            state_root: b256(target_block + 1),
+        }
+    }
+
     fn fixture() -> (HashedPostState, B256) {
         let slots = [(b256(0x10), U256::from(1)), (b256(0x11), U256::from(2))];
 
@@ -353,7 +391,10 @@ mod tests {
         factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v1());
 
         // Refusing after the wipe would destroy a v1 node's hashed tables for nothing.
-        assert!(matches!(writer.begin_generation(1), Err(SnapSyncError::UnsupportedStorageLayout)));
+        assert!(matches!(
+            writer.begin_generation(generation(1)),
+            Err(SnapSyncError::UnsupportedStorageLayout)
+        ));
         let provider = factory.database_provider_ro().unwrap();
         let mut cursor = provider.tx_ref().cursor_read::<tables::HashedAccounts>().unwrap();
         assert!(cursor.first().unwrap().is_some(), "existing state must be left untouched");
@@ -366,9 +407,9 @@ mod tests {
         let writer = SnapStateWriter::new(&factory);
         let (state, root) = fixture();
 
-        writer.begin_generation(4242).unwrap();
+        writer.begin_generation(generation(4242)).unwrap();
         // Everything between here and the root check is a partial download.
-        assert_eq!(writer.interrupted_generation().unwrap(), Some(4242));
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
 
         writer.write_state(state).unwrap();
         writer.finalize_sync(4242, root).unwrap();
@@ -383,12 +424,12 @@ mod tests {
         let writer = SnapStateWriter::new(&factory);
         let (state, _) = fixture();
 
-        writer.begin_generation(4242).unwrap();
+        writer.begin_generation(generation(4242)).unwrap();
         writer.write_state(state).unwrap();
         writer.finalize_sync(4242, b256(0xdead)).unwrap_err();
 
         // The state is still a partial download, so a restart must not trust it.
-        assert_eq!(writer.interrupted_generation().unwrap(), Some(4242));
+        assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
     }
 
     #[test]
