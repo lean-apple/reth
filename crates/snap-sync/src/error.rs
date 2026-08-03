@@ -43,6 +43,14 @@ pub enum SnapSyncError {
     /// The block the session assembled state for is no longer canonical.
     #[error("block {0} left the canonical chain before the sync could be finalized")]
     Reorged(B256),
+    /// The applied state is canonical but no longer at the head.
+    #[error("canonical head advanced from {from} to {to} before finalization completed")]
+    HeadAdvanced {
+        /// Block whose state was assembled.
+        from: B256,
+        /// New canonical head.
+        to: B256,
+    },
     /// A header required to resolve a pivot or a BAL commitment could not be found.
     #[error("header not found for block {0}")]
     MissingHeader(u64),

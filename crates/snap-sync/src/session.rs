@@ -80,6 +80,50 @@ where
         &self.state
     }
 
+    /// Drives the session until state is verified or external progress is required.
+    pub async fn run_until_blocked(&mut self) -> Result<SessionRunOutcome, SnapSyncError> {
+        loop {
+            match self.state {
+                SyncState::Idle => {
+                    self.start().await?;
+                }
+                SyncState::Downloading { .. } => match self.download().await? {
+                    StepOutcome::Advanced => {}
+                    StepOutcome::WaitingForPeers => return Ok(SessionRunOutcome::WaitingForPeers),
+                    StepOutcome::Reorged => {}
+                    StepOutcome::TargetStale => match self.advance_target().await? {
+                        StepOutcome::Advanced | StepOutcome::Reorged => {}
+                        StepOutcome::WaitingForPeers => {
+                            return Ok(SessionRunOutcome::WaitingForPeers)
+                        }
+                        StepOutcome::TargetStale => return Ok(SessionRunOutcome::WaitingForTarget),
+                    },
+                },
+                SyncState::Healing { applied, .. } => {
+                    if applied.hash != self.chain.head().hash {
+                        match self.heal().await? {
+                            StepOutcome::Advanced | StepOutcome::Reorged => {}
+                            StepOutcome::WaitingForPeers => {
+                                return Ok(SessionRunOutcome::WaitingForPeers)
+                            }
+                            StepOutcome::TargetStale => unreachable!("healing has no pivot"),
+                        }
+                        continue
+                    }
+
+                    match self.finalize().await {
+                        Ok(at) => return Ok(SessionRunOutcome::Verified(at)),
+                        Err(SnapSyncError::HeadAdvanced { .. } | SnapSyncError::Reorged(_)) => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                SyncState::Verified { at } | SyncState::Complete { at } => {
+                    return Ok(SessionRunOutcome::Verified(at))
+                }
+            }
+        }
+    }
+
     /// Discards any previous generation and picks a target behind the canonical head.
     ///
     /// The target is reached by following parent links rather than subtracting from the head's
@@ -238,7 +282,7 @@ where
         Ok(StepOutcome::Advanced)
     }
 
-    /// Rebuilds the state trie, checks its root, and persists the trie tables.
+    /// Rebuilds the state trie and leaves the verified generation pending handoff.
     ///
     /// The block the state was assembled for is re-anchored against forkchoice first. The head
     /// can move while access lists are being applied, and a root that matches an orphaned block
@@ -249,7 +293,7 @@ where
         };
 
         let token = self.chain.canonical_token();
-        self.ensure_canonical(applied).await?;
+        self.ensure_current_head(applied).await?;
 
         self.writer().finalize_sync(applied.number, applied.state_root)?;
 
@@ -258,24 +302,24 @@ where
         // forkchoice update landed while it was running; the trie tables it wrote are rebuilt
         // from hashed state on the next attempt either way.
         if self.chain.canonical_token() != token {
-            self.ensure_canonical(applied).await?;
+            self.ensure_current_head(applied).await?;
         }
 
-        // Only now is the state known to be both verified and still canonical. Once an
-        // engine-side handoff exists, this clear belongs in its completion transaction instead.
-        self.writer().complete_generation()?;
+        self.state = SyncState::Verified { at: applied };
 
-        self.state = SyncState::Complete { at: applied };
-
-        info!(target: "snap", number = applied.number, hash = %applied.hash, "Snap sync complete");
+        info!(target: "snap", number = applied.number, hash = %applied.hash, "Snap state verified");
         Ok(applied)
     }
 
-    /// Fails when `block` is no longer on the canonical chain, resetting the session.
-    async fn ensure_canonical(&mut self, block: BlockRef) -> Result<(), SnapSyncError> {
+    /// Requires `block` to remain the exact canonical head.
+    async fn ensure_current_head(&mut self, block: BlockRef) -> Result<(), SnapSyncError> {
         let head = self.chain.head();
-        if block.hash == head.hash || self.chain.segment(block.hash, head.hash).await.is_ok() {
+        if block.hash == head.hash {
             return Ok(())
+        }
+
+        if self.chain.segment(block.hash, head.hash).await.is_ok() {
+            return Err(SnapSyncError::HeadAdvanced { from: block.hash, to: head.hash })
         }
 
         self.state = SyncState::Idle;
@@ -414,6 +458,24 @@ where
     }
 }
 
+impl<C, F, H> SnapSyncSession<C, F, H>
+where
+    F: DatabaseProviderFactory,
+    F::ProviderRW: DBProvider + StateWriter,
+    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+{
+    /// Clears the generation marker after the node has installed the verified head.
+    pub fn accept(&mut self) -> Result<BlockRef, SnapSyncError> {
+        let SyncState::Verified { at } = self.state else {
+            return Err(SnapSyncError::Network("session has no verified state to accept".into()))
+        };
+
+        SnapStateWriter::new(&self.factory).complete_generation()?;
+        self.state = SyncState::Complete { at };
+        Ok(at)
+    }
+}
+
 /// Where a session is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
@@ -433,11 +495,27 @@ pub enum SyncState {
         /// The highest block whose access list has been applied.
         applied: BlockRef,
     },
-    /// The assembled state was verified against a header.
+    /// State and trie match `at`, but the node has not installed that head yet.
+    Verified {
+        /// Block the verified state corresponds to.
+        at: BlockRef,
+    },
+    /// The verified state was installed as the node's state.
     Complete {
         /// The block the state corresponds to.
         at: BlockRef,
     },
+}
+
+/// Why a session stopped driving itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRunOutcome {
+    /// State at this block is verified and ready for the node handoff.
+    Verified(BlockRef),
+    /// No connected peer currently supports snap/2.
+    WaitingForPeers,
+    /// The pivot is stale and forkchoice has not supplied a newer target.
+    WaitingForTarget,
 }
 
 /// What one step of the session accomplished.
@@ -464,6 +542,105 @@ fn bal_capable_target(initial: BlockRef, catch_up: &[BlockRef]) -> BlockRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_db_api::models::StorageSettings;
+    use reth_eth_wire_types::snap::{
+        GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage,
+    };
+    use reth_network_p2p::{
+        download::DownloadClient, error::PeerRequestResult, priority::Priority,
+    };
+    use reth_provider::test_utils::create_test_provider_factory;
+    use std::future::{ready, Ready};
+
+    #[derive(Debug)]
+    struct NoSnapPeers;
+
+    impl DownloadClient for NoSnapPeers {
+        fn report_bad_message(&self, _peer_id: reth_network_peers::PeerId) {
+            panic!("a request never reached a peer")
+        }
+
+        fn num_connected_peers(&self) -> usize {
+            0
+        }
+    }
+
+    impl SnapClient for NoSnapPeers {
+        type Output = Ready<PeerRequestResult<SnapResponse>>;
+
+        fn get_account_range_with_priority(
+            &self,
+            _request: GetAccountRangeMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(RequestError::UnsupportedCapability))
+        }
+
+        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+            self.get_storage_ranges_with_priority(request, Priority::Normal)
+        }
+
+        fn get_storage_ranges_with_priority(
+            &self,
+            _request: GetStorageRangesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(RequestError::UnsupportedCapability))
+        }
+
+        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+            self.get_byte_codes_with_priority(request, Priority::Normal)
+        }
+
+        fn get_byte_codes_with_priority(
+            &self,
+            _request: GetByteCodesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(RequestError::UnsupportedCapability))
+        }
+
+        fn get_block_access_lists_with_priority(
+            &self,
+            _request: GetBlockAccessListsMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(RequestError::UnsupportedCapability))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FixedChain(BlockRef);
+
+    impl CanonicalChainSource for FixedChain {
+        fn head(&self) -> BlockRef {
+            self.0
+        }
+
+        fn canonical_token(&self) -> u64 {
+            0
+        }
+
+        async fn ancestor(&self, from: B256, depth: u64) -> Result<BlockRef, crate::ChainError> {
+            if from == self.0.hash && depth == 0 {
+                Ok(self.0)
+            } else {
+                Err(crate::ChainError::UnknownBlock(from))
+            }
+        }
+
+        async fn segment(
+            &self,
+            ancestor: B256,
+            head: B256,
+        ) -> Result<Vec<BlockRef>, crate::ChainError> {
+            if ancestor == head && head == self.0.hash {
+                Ok(Vec::new())
+            } else {
+                Err(crate::ChainError::NotAnAncestor { ancestor, head })
+            }
+        }
+    }
 
     fn block(number: u64, has_bal: bool) -> BlockRef {
         BlockRef {
@@ -495,5 +672,45 @@ mod tests {
         let catch_up = [block(11, true), block(12, true)];
 
         assert_eq!(bal_capable_target(initial, &catch_up), initial);
+    }
+
+    #[test]
+    fn acceptance_clears_the_generation_marker_after_verification() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let at = block(5, true);
+        let generation = SnapGeneration {
+            target_block: at.number,
+            target_hash: at.hash,
+            state_root: at.state_root,
+        };
+        SnapStateWriter::new(&factory).begin_generation(generation).unwrap();
+
+        let mut session = SnapSyncSession {
+            client: (),
+            factory,
+            chain: (),
+            bal_store: BalStoreHandle::noop(),
+            state: SyncState::Verified { at },
+            metrics: SnapSyncMetrics::default(),
+            request_id: AtomicU64::new(0),
+        };
+
+        assert_eq!(session.accept().unwrap(), at);
+        assert_eq!(session.state, SyncState::Complete { at });
+        assert_eq!(SnapStateWriter::new(&session.factory).interrupted_generation().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn runner_pauses_without_losing_its_generation_when_snap_peers_are_absent() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let head = block(0, true);
+        let mut session =
+            SnapSyncSession::new(NoSnapPeers, factory, FixedChain(head), BalStoreHandle::noop());
+
+        assert_eq!(session.run_until_blocked().await.unwrap(), SessionRunOutcome::WaitingForPeers);
+        assert!(matches!(session.state, SyncState::Downloading { target, .. } if target == head));
+        assert!(SnapStateWriter::new(&session.factory).interrupted_generation().unwrap().is_some());
     }
 }

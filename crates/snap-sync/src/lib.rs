@@ -40,7 +40,7 @@ mod proof;
 pub use chain::{BlockRef, CanonicalChainSource, ChainError, HeaderChain};
 pub use download::{DownloadStateOutcome, StateDownloader};
 pub use error::SnapSyncError;
-pub use session::{SnapSyncSession, StepOutcome, SyncState};
+pub use session::{SessionRunOutcome, SnapSyncSession, StepOutcome, SyncState};
 pub use store::{SnapGeneration, SnapStateWriter};
 
 /// How many blocks behind the canonical head a sync target is placed.
