@@ -28,9 +28,9 @@ pub(crate) const fn should_snap_bootstrap(
     enabled && !is_optimism && uses_hashed_state && (finish <= genesis || interrupted)
 }
 
-/// Backfill controller that persists headers before downloading snap state.
+/// Adds an optional snap bootstrap before regular pipeline backfill.
 #[derive(Debug)]
-pub(crate) struct SnapPipelineSync<N: ProviderNodeTypes, C> {
+pub(crate) struct SnapBootstrapSync<N: ProviderNodeTypes, C> {
     runtime: Runtime,
     header_pipeline: Option<Box<Pipeline<N>>>,
     fallback: PipelineSync<N>,
@@ -38,28 +38,29 @@ pub(crate) struct SnapPipelineSync<N: ProviderNodeTypes, C> {
     factory: ProviderFactory<N>,
     bal_store: BalStoreHandle,
     pending_target: Option<PipelineTarget>,
-    bootstrapped: bool,
+    use_fallback: bool,
     state: SnapBackfillState<N>,
 }
 
-impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
+impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
     pub(crate) fn new(
-        header_pipeline: Pipeline<N>,
+        header_pipeline: Option<Pipeline<N>>,
         fallback: PipelineSync<N>,
         client: C,
         factory: ProviderFactory<N>,
         bal_store: BalStoreHandle,
         runtime: Runtime,
     ) -> Self {
+        let use_fallback = header_pipeline.is_none();
         Self {
             runtime,
-            header_pipeline: Some(Box::new(header_pipeline)),
+            header_pipeline: header_pipeline.map(Box::new),
             fallback,
             client,
             factory,
             bal_store,
             pending_target: None,
-            bootstrapped: false,
+            use_fallback,
             state: SnapBackfillState::Idle,
         }
     }
@@ -169,7 +170,7 @@ impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
                 return Poll::Ready(match response {
                     Ok(result) => {
                         if matches!(result, Ok(ControlFlow::Continue { .. })) {
-                            self.bootstrapped = true;
+                            self.use_fallback = true;
                             if let Some(target) = self.pending_target.take() {
                                 self.fallback.on_action(BackfillAction::Start(target));
                             }
@@ -274,13 +275,13 @@ impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
     }
 }
 
-impl<N, C> BackfillSync for SnapPipelineSync<N, C>
+impl<N, C> BackfillSync for SnapBootstrapSync<N, C>
 where
     N: ProviderNodeTypes,
     C: SnapClient + Clone + 'static,
 {
     fn on_action(&mut self, action: BackfillAction) {
-        if self.bootstrapped {
+        if self.use_fallback {
             self.fallback.on_action(action);
             return
         }
@@ -290,7 +291,7 @@ where
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<BackfillEvent> {
-        if self.bootstrapped {
+        if self.use_fallback {
             return self.fallback.poll(cx)
         }
         if let Some(event) = self.try_spawn_headers() {

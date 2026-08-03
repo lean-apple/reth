@@ -1,6 +1,6 @@
 //! Engine node related functionality.
 
-use super::snap::{should_snap_bootstrap, SnapPipelineSync};
+use super::snap::{should_snap_bootstrap, SnapBootstrapSync};
 use crate::{
     common::{Attached, LaunchContextWith, WithConfigs},
     hooks::NodeHooks,
@@ -15,7 +15,7 @@ use futures::{stream::FusedStream, stream_select, FutureExt, StreamExt};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
-    backfill::{EitherBackfillSync, PipelineSync},
+    backfill::PipelineSync,
     chain::{ChainEvent, FromOrchestrator},
     engine::{EngineApiKind, EngineApiRequest, EngineRequestHandler},
     launch::build_engine_orchestrator,
@@ -288,18 +288,14 @@ impl EngineNodeLauncher {
             EngineApiKind::Ethereum
         };
 
-        let pipeline_sync = PipelineSync::new(pipeline, ctx.task_executor().clone());
-        let backfill_sync = match snap_header_pipeline {
-            Some(header_pipeline) => EitherBackfillSync::Left(SnapPipelineSync::new(
-                header_pipeline,
-                pipeline_sync,
-                network_client.clone(),
-                ctx.provider_factory().clone(),
-                ctx.blockchain_db().bal_store().clone(),
-                ctx.task_executor().clone(),
-            )),
-            None => EitherBackfillSync::Right(pipeline_sync),
-        };
+        let backfill_sync = SnapBootstrapSync::new(
+            snap_header_pipeline,
+            PipelineSync::new(pipeline, ctx.task_executor().clone()),
+            network_client.clone(),
+            ctx.provider_factory().clone(),
+            ctx.blockchain_db().bal_store().clone(),
+            ctx.task_executor().clone(),
+        );
 
         let mut orchestrator = build_engine_orchestrator(
             engine_kind,
