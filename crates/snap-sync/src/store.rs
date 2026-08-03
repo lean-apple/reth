@@ -136,24 +136,6 @@ where
         Ok(())
     }
 
-    /// Clears the generation marker: the assembled state has been accepted as this node's state.
-    ///
-    /// Split from [`finalize_sync`](Self::finalize_sync) because a matching root is not
-    /// acceptance: the block can be orphaned while the trie is being walked, and the marker must
-    /// outlive every state the node has not committed to building on.
-    pub fn complete_generation(&self) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        {
-            let tx = provider.tx_ref();
-            tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
-                .map_err(db_err)?;
-            tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
-                .map_err(db_err)?;
-        }
-        provider.commit().map_err(db_err)?;
-        Ok(())
-    }
-
     /// Accepts the state and aligns Reth's pipeline and static-file frontiers with it.
     pub fn accept_generation(&self, block_number: u64) -> Result<(), SnapSyncError>
     where
@@ -213,32 +195,6 @@ where
             }
         }
 
-        provider.commit().map_err(db_err)?;
-        Ok(())
-    }
-
-    /// Writes hashed accounts and storage slots.
-    pub fn write_state(&self, state: HashedPostState) -> Result<(), SnapSyncError> {
-        if state.is_empty() {
-            return Ok(())
-        }
-
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        provider.write_hashed_state(&state.into_sorted()).map_err(db_err)?;
-        provider.commit().map_err(db_err)?;
-        Ok(())
-    }
-
-    /// Writes contract bytecodes, skipping empty code.
-    pub fn write_bytecodes(&self, codes: &[(B256, Bytes)]) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        {
-            let tx = provider.tx_ref();
-            for (hash, code) in codes.iter().filter(|(_, code)| !code.is_empty()) {
-                tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone()))
-                    .map_err(db_err)?;
-            }
-        }
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -432,7 +388,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let (state, root) = fixture();
         let writer = SnapStateWriter::new(&factory);
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         writer.finalize_sync(100, root).unwrap();
 
@@ -445,7 +401,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let (state, root) = fixture();
         let writer = SnapStateWriter::new(&factory);
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         let err = writer.finalize_sync(100, b256(0xdead)).unwrap_err();
 
@@ -466,7 +422,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let writer = SnapStateWriter::new(&factory);
         let (state, _) = fixture();
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v1());
 
@@ -491,14 +447,13 @@ mod tests {
         // Everything between here and acceptance is not this node's state yet.
         assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
 
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
         writer.finalize_sync(4242, root).unwrap();
 
-        // A matching root is not acceptance: the block can be orphaned during the trie walk, so
-        // only the explicit completion clears the marker.
+        // A matching root is not acceptance: only pipeline handoff clears the marker.
         assert_eq!(writer.interrupted_generation().unwrap(), Some(generation(4242)));
 
-        writer.complete_generation().unwrap();
+        writer.accept_generation(4242).unwrap();
         assert_eq!(writer.interrupted_generation().unwrap(), None);
     }
 
@@ -536,7 +491,7 @@ mod tests {
         let (state, _) = fixture();
 
         writer.begin_generation(generation(4242)).unwrap();
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
         writer.finalize_sync(4242, b256(0xdead)).unwrap_err();
 
         // The state is still a partial download, so a restart must not trust it.
@@ -551,7 +506,7 @@ mod tests {
         let (state, _) = fixture();
 
         writer.begin_generation(generation(7)).unwrap();
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         writer.update_generation(generation(9)).unwrap();
 
@@ -567,7 +522,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let (state, root) = fixture();
         let writer = SnapStateWriter::new(&factory);
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         // One entry per chunk, so the walk resumes from an intermediate state many times over.
         writer.finalize_sync_chunked(100, root, Some(1)).unwrap();
@@ -580,15 +535,18 @@ mod tests {
         let factory = create_test_provider_factory();
         let (state, root) = fixture();
         let writer = SnapStateWriter::new(&factory);
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
         writer.finalize_sync(100, root).unwrap();
 
         let replacement = account(999);
         writer
-            .write_state(HashedPostState {
-                accounts: B256Map::from_iter([(hashed_address(7), Some(replacement))]),
-                storages: B256Map::default(),
-            })
+            .commit_batch(
+                HashedPostState {
+                    accounts: B256Map::from_iter([(hashed_address(7), Some(replacement))]),
+                    storages: B256Map::default(),
+                },
+                &[],
+            )
             .unwrap();
 
         let slots = [(b256(0x10), U256::from(1)), (b256(0x11), U256::from(2))];
@@ -608,7 +566,7 @@ mod tests {
         let factory = create_test_provider_factory();
         let (state, _) = fixture();
         let writer = SnapStateWriter::new(&factory);
-        writer.write_state(state).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
 
         // Chunks are written as the walk goes, so the mismatch has to discard the earlier ones too.
         assert!(matches!(
@@ -627,7 +585,7 @@ mod tests {
         // Drop one account, as a peer withholding a range would.
         let mut partial = state;
         partial.accounts.remove(&hashed_address(7));
-        writer.write_state(partial).unwrap();
+        writer.commit_batch(partial, &[]).unwrap();
 
         assert!(matches!(
             writer.finalize_sync(100, root),
