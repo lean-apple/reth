@@ -22,9 +22,8 @@ reth node --snap
 ```
 
 Advertising the capability commits the node to answering those requests, so
-leave it off unless you want to serve state to syncing peers. Block access
-lists are only retained in memory at runtime; a restart empties the served
-window until new payloads arrive.
+leave it off unless you want to serve state to syncing peers. Canonical block
+access lists are retained on disk for the EIP-7928 retention window.
 
 ## Syncing with snap/2
 
