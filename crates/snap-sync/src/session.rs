@@ -87,11 +87,7 @@ where
     /// a pre-existing genesis state from being mistaken for downloaded state.
     pub async fn start(&mut self) -> Result<BlockRef, SnapSyncError> {
         let head = self.chain.head();
-        let target = self
-            .chain
-            .ancestor(head.hash, PIVOT_OFFSET)
-            .await
-            .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
+        let target = self.select_target(head).await?;
 
         self.writer().begin_generation(SnapGeneration {
             target_block: target.number,
@@ -148,11 +144,7 @@ where
         };
 
         let head = self.chain.head();
-        let new_target = self
-            .chain
-            .ancestor(head.hash, PIVOT_OFFSET)
-            .await
-            .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
+        let new_target = self.select_target(head).await?;
 
         if new_target.hash == target.hash {
             return Ok(StepOutcome::TargetStale)
@@ -288,6 +280,30 @@ where
 
         self.state = SyncState::Idle;
         Err(SnapSyncError::Reorged(block.hash))
+    }
+
+    /// Chooses a recent target whose entire catch-up segment has BAL commitments.
+    ///
+    /// A fixed depth can cross the EIP-7928 activation boundary, where replay is impossible, and
+    /// can also exceed the height of a short devnet chain. The last pre-BAL block is a valid
+    /// target because catch-up starts with its child; every block after it must carry a BAL.
+    async fn select_target(&self, head: BlockRef) -> Result<BlockRef, SnapSyncError> {
+        if head.bal_hash.is_none() {
+            return Err(SnapSyncError::BalNotActive(head.number))
+        }
+
+        let depth = PIVOT_OFFSET.min(head.number);
+        let initial = self
+            .chain
+            .ancestor(head.hash, depth)
+            .await
+            .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
+        let segment =
+            self.chain.segment(initial.hash, head.hash).await.map_err(|err| {
+                SnapSyncError::Network(format!("checking sync target BALs: {err}"))
+            })?;
+
+        Ok(bal_capable_target(initial, &segment))
     }
 
     /// Returns a block's access list, verified against the header's commitment.
@@ -437,4 +453,47 @@ pub enum StepOutcome {
     WaitingForPeers,
     /// The chain moved out from under the session, which has been reset.
     Reorged,
+}
+
+/// Returns the last block without a BAL commitment, or the initially selected target when the
+/// whole catch-up segment is already post-activation.
+fn bal_capable_target(initial: BlockRef, catch_up: &[BlockRef]) -> BlockRef {
+    catch_up.iter().rfind(|block| block.bal_hash.is_none()).copied().unwrap_or(initial)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(number: u64, has_bal: bool) -> BlockRef {
+        BlockRef {
+            hash: B256::with_last_byte(number as u8),
+            number,
+            parent_hash: B256::with_last_byte(number.saturating_sub(1) as u8),
+            state_root: B256::repeat_byte(number as u8),
+            bal_hash: has_bal.then_some(B256::repeat_byte(0xaa)),
+        }
+    }
+
+    #[test]
+    fn pivot_depth_never_exceeds_a_short_chain() {
+        assert_eq!(PIVOT_OFFSET.min(3), 3);
+        assert_eq!(PIVOT_OFFSET.min(0), 0);
+    }
+
+    #[test]
+    fn target_moves_to_the_last_pre_bal_block() {
+        let initial = block(1, false);
+        let catch_up = [block(2, false), block(3, false), block(4, true), block(5, true)];
+
+        assert_eq!(bal_capable_target(initial, &catch_up), catch_up[1]);
+    }
+
+    #[test]
+    fn post_activation_segment_keeps_the_initial_target() {
+        let initial = block(10, true);
+        let catch_up = [block(11, true), block(12, true)];
+
+        assert_eq!(bal_capable_target(initial, &catch_up), initial);
+    }
 }

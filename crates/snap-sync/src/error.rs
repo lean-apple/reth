@@ -49,6 +49,9 @@ pub enum SnapSyncError {
     /// No peer had the block access list for a block that requires one.
     #[error("block access list not available for block {0}")]
     MissingBal(u64),
+    /// The canonical head predates EIP-7928, so access-list catch-up is unavailable.
+    #[error("snap sync requires an EIP-7928 head, but block {0} has no BAL commitment")]
+    BalNotActive(u64),
     /// The database uses the legacy plain-state layout, which snap sync cannot populate.
     ///
     /// Snap responses are keyed by hashed address with no preimage, so only a layout that reads
