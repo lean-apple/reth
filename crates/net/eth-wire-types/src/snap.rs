@@ -131,7 +131,7 @@ impl AccountData {
     /// Range proofs are verified against the full encoding, so the omitted storage root and code
     /// hash are restored to their defaults here.
     pub fn trie_account(&self) -> alloy_rlp::Result<TrieAccount> {
-        let slim = SlimAccountBody::decode(&mut self.body.as_ref())?;
+        let slim = alloy_rlp::decode_exact::<SlimAccountBody>(&self.body)?;
 
         Ok(TrieAccount {
             nonce: slim.nonce,
@@ -282,7 +282,7 @@ impl StorageData {
 
     /// Decodes the slot value.
     pub fn value(&self) -> alloy_rlp::Result<U256> {
-        U256::decode(&mut self.data.as_ref())
+        alloy_rlp::decode_exact(&self.data)
     }
 }
 
@@ -902,6 +902,15 @@ mod tests {
     }
 
     #[test]
+    fn slim_body_rejects_trailing_bytes() {
+        let account = trie_account(EMPTY_ROOT_HASH, KECCAK256_EMPTY);
+        let mut encoded = AccountData::from_trie_account(B256::repeat_byte(1), &account);
+        encoded.body = [encoded.body.as_ref(), &[0x00]].concat().into();
+
+        assert!(encoded.trie_account().is_err());
+    }
+
+    #[test]
     fn storage_data_carries_the_trie_leaf_encoding() {
         let value = U256::from(1234);
         let slot = StorageData::from_value(B256::repeat_byte(4), value);
@@ -910,5 +919,13 @@ mod tests {
         // exactly that rather than a fixed-width word.
         assert_eq!(slot.data.as_ref(), alloy_rlp::encode(value));
         assert_eq!(slot.value().unwrap(), value);
+    }
+
+    #[test]
+    fn storage_data_rejects_trailing_bytes() {
+        let mut slot = StorageData::from_value(B256::repeat_byte(4), U256::from(1));
+        slot.data = [slot.data.as_ref(), &[0x00]].concat().into();
+
+        assert!(slot.value().is_err());
     }
 }
