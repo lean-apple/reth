@@ -9,7 +9,9 @@ use reth_db_api::{
 use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::DatabaseProviderFactory;
 use reth_stages_types::{StageCheckpoint, StageId};
-use reth_storage_api::{DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
+use reth_storage_api::{
+    DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache, TrieWriter,
+};
 use reth_trie::{HashedPostState, StateRoot, StateRootProgress};
 use reth_trie_db::DatabaseStateRoot;
 
@@ -139,6 +141,24 @@ where
     /// outlive every state the node has not committed to building on.
     pub fn complete_generation(&self) -> Result<(), SnapSyncError> {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        {
+            let tx = provider.tx_ref();
+            tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
+                .map_err(db_err)?;
+            tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
+                .map_err(db_err)?;
+        }
+        provider.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Accepts the state and advances Reth's pipeline checkpoints in one commit.
+    pub fn accept_generation(&self, block_number: u64) -> Result<(), SnapSyncError>
+    where
+        F::ProviderRW: StageCheckpointWriter,
+    {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        provider.update_pipeline_stages(block_number, false).map_err(db_err)?;
         {
             let tx = provider.tx_ref();
             tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
@@ -328,6 +348,7 @@ mod tests {
     use alloy_primitives::{map::B256Map, U256};
     use reth_db_api::cursor::DbCursorRO;
     use reth_provider::test_utils::create_test_provider_factory;
+    use reth_storage_api::StageCheckpointReader;
     use reth_trie::{test_utils::state_root_prehashed, HashedStorage};
 
     fn b256(value: u64) -> B256 {
@@ -459,6 +480,22 @@ mod tests {
 
         writer.complete_generation().unwrap();
         assert_eq!(writer.interrupted_generation().unwrap(), None);
+    }
+
+    #[test]
+    fn acceptance_advances_pipeline_checkpoints_and_clears_the_marker_atomically() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v2());
+        let writer = SnapStateWriter::new(&factory);
+        writer.begin_generation(generation(4242)).unwrap();
+
+        writer.accept_generation(4242).unwrap();
+
+        assert_eq!(writer.interrupted_generation().unwrap(), None);
+        let provider = factory.database_provider_ro().unwrap();
+        for stage in StageId::ALL {
+            assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 4242);
+        }
     }
 
     #[test]

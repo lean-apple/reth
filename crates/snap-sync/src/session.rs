@@ -24,7 +24,10 @@ use reth_network_p2p::{
     snap::client::{SnapClient, SnapResponse},
 };
 use reth_provider::DatabaseProviderFactory;
-use reth_storage_api::{BalStoreHandle, DBProvider, StateWriter, StorageSettingsCache, TrieWriter};
+use reth_storage_api::{
+    BalStoreHandle, DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache,
+    TrieWriter,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
@@ -461,7 +464,7 @@ where
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
+    F::ProviderRW: DBProvider + StageCheckpointWriter + StateWriter,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
     /// Clears the generation marker after the node has installed the verified head.
@@ -470,7 +473,7 @@ where
             return Err(SnapSyncError::Network("session has no verified state to accept".into()))
         };
 
-        SnapStateWriter::new(&self.factory).complete_generation()?;
+        SnapStateWriter::new(&self.factory).accept_generation(at.number)?;
         self.state = SyncState::Complete { at };
         Ok(at)
     }
