@@ -153,6 +153,12 @@ const DEFAULT_COMPRESS_BUF_CAPACITY: usize = 4096;
 /// The consistency check on startup heals any crash that occurs between auto-commits.
 const DEFAULT_AUTO_COMMIT_THRESHOLD: usize = 512 * 1024 * 1024;
 
+/// BALs at least this large use `RocksDB` blob files.
+const DEFAULT_BAL_MIN_BLOB_SIZE: u64 = 4 * 1024;
+
+/// Target BAL blob file size.
+const DEFAULT_BAL_BLOB_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Builder for [`RocksDBProvider`].
 pub struct RocksDBBuilder {
     path: PathBuf,
@@ -259,6 +265,16 @@ impl RocksDBBuilder {
         cf_options
     }
 
+    /// Uses blob files for large BALs to avoid regular LSM value compaction.
+    fn block_access_lists_column_family_options(cache: &Cache) -> Options {
+        let mut options = Self::default_column_family_options(cache);
+        options.set_enable_blob_files(true);
+        options.set_min_blob_size(DEFAULT_BAL_MIN_BLOB_SIZE);
+        options.set_blob_file_size(DEFAULT_BAL_BLOB_FILE_SIZE);
+        options.set_blob_compression_type(DBCompressionType::Lz4);
+        options
+    }
+
     /// Creates optimized column family options for `TransactionHashNumbers`.
     ///
     /// This table stores `B256 -> TxNumber` mappings where:
@@ -297,10 +313,12 @@ impl RocksDBBuilder {
     /// - [`tables::TransactionHashNumbers`] - Transaction hash to number mapping
     /// - [`tables::AccountsHistory`] - Account history index
     /// - [`tables::StoragesHistory`] - Storage history index
+    /// - [`tables::BlockAccessLists`] - Persisted block access lists
     pub fn with_default_tables(self) -> Self {
         self.with_table::<tables::TransactionHashNumbers>()
             .with_table::<tables::AccountsHistory>()
             .with_table::<tables::StoragesHistory>()
+            .with_table::<tables::BlockAccessLists>()
     }
 
     /// Enables metrics.
@@ -352,6 +370,8 @@ impl RocksDBBuilder {
             .map(|name| {
                 let cf_options = if name == tables::TransactionHashNumbers::NAME {
                     Self::tx_hash_numbers_column_family_options(&self.block_cache)
+                } else if name == tables::BlockAccessLists::NAME {
+                    Self::block_access_lists_column_family_options(&self.block_cache)
                 } else {
                     Self::default_column_family_options(&self.block_cache)
                 };
@@ -1004,6 +1024,18 @@ impl RocksDBProvider {
             .0
             .iterator_cf(cf, IteratorMode::From(encoded_key.as_ref(), rocksdb::Direction::Forward));
         Ok(RocksDBIter { inner: iter, _marker: std::marker::PhantomData })
+    }
+
+    /// Creates a raw key iterator starting at `key` without loading values.
+    pub(crate) fn raw_key_iter_from<T: Table>(
+        &self,
+        key: T::Key,
+    ) -> ProviderResult<RocksDBRawKeyIter<'_>> {
+        let cf = self.get_cf_handle::<T>()?;
+        let encoded_key = key.encode();
+        let mut iter = self.0.raw_iterator_cf(cf);
+        iter.seek(encoded_key.as_ref());
+        Ok(RocksDBRawKeyIter { inner: iter })
     }
 
     /// Returns statistics for all column families in the database.
@@ -2708,6 +2740,40 @@ impl<T: Table> Iterator for RocksDBIter<'_, T> {
 /// Yields raw `(key_bytes, value_bytes)` pairs without decoding.
 pub struct RocksDBRawIter<'db> {
     inner: RocksDBIterEnum<'db>,
+}
+
+/// Raw key iterator over a `RocksDB` table.
+pub(crate) struct RocksDBRawKeyIter<'db> {
+    inner: RocksDBRawIterEnum<'db>,
+}
+
+impl fmt::Debug for RocksDBRawKeyIter<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RocksDBRawKeyIter").finish_non_exhaustive()
+    }
+}
+
+impl Iterator for RocksDBRawKeyIter<'_> {
+    type Item = ProviderResult<Box<[u8]>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.inner.valid() {
+            return self.inner.status().err().map(|err| {
+                Err(ProviderError::Database(DatabaseError::Read(DatabaseErrorInfo {
+                    message: err.to_string().into(),
+                    code: -1,
+                })))
+            })
+        }
+
+        let key = self
+            .inner
+            .key()
+            .map(Box::from)
+            .ok_or_else(|| ProviderError::Database(DatabaseError::Decode));
+        self.inner.next();
+        Some(key)
+    }
 }
 
 impl fmt::Debug for RocksDBRawIter<'_> {

@@ -166,6 +166,11 @@ where
     ) -> Result<PersistenceResult, PersistenceError> {
         let first_block =
             input.first_persist_rest_block().map(|block| block.recovered_block().num_hash());
+        let canonical_blocks = input
+            .persist_rest_blocks()
+            .iter()
+            .map(|block| block.recovered_block().num_hash())
+            .collect::<Vec<_>>();
         let last_block = input.last_block();
         let block_count = input.persist_rest_blocks().len();
 
@@ -206,7 +211,7 @@ where
         }
 
         provider_rw.commit()?;
-        let _ = self.provider.bal_store().flush().inspect_err(|err| {
+        let _ = self.provider.bal_store().flush(&canonical_blocks).inspect_err(|err| {
             warn!(target: "engine::persistence", last=?last_block, ?err, "Failed to flush BAL store");
         });
         debug!(target: "engine::persistence", first=?first_block, last=?last_block, "Saved range of blocks");

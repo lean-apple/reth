@@ -45,6 +45,8 @@ pub struct SnapSyncSession<C, F, H> {
     /// Only an optimization: a session falls back to requesting a list from peers, and verifies
     /// it against the header commitment either way.
     bal_store: BalStoreHandle,
+    /// Verified BALs awaiting a canonical durable handoff.
+    verified_bal_blocks: Vec<NumHash>,
     /// Where the session currently is.
     state: SyncState,
     /// Progress counters for this session.
@@ -72,6 +74,7 @@ where
             factory,
             chain,
             bal_store,
+            verified_bal_blocks: Vec::new(),
             state: SyncState::Idle,
             metrics: SnapSyncMetrics::default(),
             request_id: AtomicU64::new(0),
@@ -132,6 +135,7 @@ where
     /// height, so it is a block on *this* chain. Starting clean is what keeps a failed attempt or
     /// a pre-existing genesis state from being mistaken for downloaded state.
     pub async fn start(&mut self) -> Result<BlockRef, SnapSyncError> {
+        self.verified_bal_blocks.clear();
         let head = self.chain.head();
         let target = self.select_target(head).await?;
 
@@ -307,6 +311,11 @@ where
             self.ensure_current_head(applied).await?;
         }
 
+        self.bal_store.flush(&self.verified_bal_blocks).map_err(|err| {
+            SnapSyncError::Database(format!("flushing block access lists: {err}"))
+        })?;
+        self.verified_bal_blocks.clear();
+
         self.state = SyncState::Verified { at: applied };
 
         info!(target: "snap", number = applied.number, hash = %applied.hash, "Snap state verified");
@@ -355,14 +364,14 @@ where
     /// Returns a block's access list, verified against the header's commitment.
     ///
     /// Prefers a list the engine already cached for this hash and falls back to a snap/2 request.
-    async fn verified_bal(&self, block: &BlockRef) -> Result<Bytes, SnapSyncError> {
+    async fn verified_bal(&mut self, block: &BlockRef) -> Result<Bytes, SnapSyncError> {
         let expected = block.bal_hash.ok_or(SnapSyncError::MissingBal(block.number))?;
 
         let cached = self
             .bal_store
-            .get_by_hashes(core::slice::from_ref(&block.hash))
+            .get_by_block_num_hash(NumHash::new(block.number, block.hash))
             .ok()
-            .and_then(|mut found| found.pop().flatten());
+            .flatten();
 
         let (peer, bal) = match cached {
             // Already held by the node, so there is no peer to hold to account.
@@ -380,13 +389,16 @@ where
             return Err(SnapSyncError::BalVerification { block: block.number, expected })
         }
 
+        let num_hash = NumHash::new(block.number, block.hash);
+        if !self.verified_bal_blocks.contains(&num_hash) {
+            self.verified_bal_blocks.push(num_hash);
+        }
+
         // A list fetched from a peer is now as trustworthy as one a payload carried, so share it
         // through the same store instead of fetching it again on the next pass. Best-effort: the
         // list in hand is what matters.
         if peer.is_some() &&
-            let Err(err) = self
-                .bal_store
-                .insert(NumHash::new(block.number, block.hash), RawBal::new(bal.clone()))
+            let Err(err) = self.bal_store.insert(num_hash, RawBal::new(bal.clone()))
         {
             debug!(target: "snap", %err, number = block.number, "Failed to cache fetched BAL");
         }
@@ -701,6 +713,7 @@ mod tests {
             factory,
             chain: (),
             bal_store: BalStoreHandle::noop(),
+            verified_bal_blocks: Vec::new(),
             state: SyncState::Verified { at },
             metrics: SnapSyncMetrics::default(),
             request_id: AtomicU64::new(0),
