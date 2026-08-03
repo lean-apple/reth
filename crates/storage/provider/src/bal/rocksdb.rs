@@ -13,7 +13,7 @@ use reth_storage_api::{BalNotification, BalNotificationStream, BalStore, RawBal}
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_tokio_util::EventSender;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -155,23 +155,41 @@ impl RocksDBBalStoreBuffer {
         }
     }
 
-    fn prune(&mut self, mode: PruneMode, tip: BlockNumber) -> usize {
+    fn prune_cache(&mut self, mode: PruneMode, tip: BlockNumber) -> Vec<StoredBlockAccessListKey> {
         let numbers = self
             .hashes_by_number
             .keys()
             .copied()
             .take_while(|number| mode.should_prune(*number, tip))
             .collect::<Vec<_>>();
-        let mut removed = 0;
+        let mut removed = Vec::new();
 
         for number in numbers {
             let Some(hashes) = self.hashes_by_number.remove(&number) else { continue };
             for hash in hashes {
-                self.pending.remove(&StoredBlockAccessListKey::new(NumHash::new(number, hash)));
-                removed += usize::from(self.entries.remove(&hash).is_some());
+                if self.entries.remove(&hash).is_some() {
+                    removed.push(StoredBlockAccessListKey::new(NumHash::new(number, hash)));
+                }
             }
         }
         removed
+    }
+
+    fn prune_pending(
+        &mut self,
+        mode: PruneMode,
+        tip: BlockNumber,
+    ) -> Vec<StoredBlockAccessListKey> {
+        let keys = self
+            .pending
+            .keys()
+            .copied()
+            .take_while(|key| mode.should_prune(key.number(), tip))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            self.pending.remove(key);
+        }
+        keys
     }
 
     fn remove_hash_from_number(&mut self, number: BlockNumber, hash: BlockHash) {
@@ -232,24 +250,26 @@ impl BalStore for RocksDBBalStore {
         }
 
         if let Some(tip) = buffer.highest_block_number {
-            buffer.prune(self.buffer_retention, tip);
+            buffer.prune_cache(self.buffer_retention, tip);
         }
         Ok(())
     }
 
     fn prune(&self, tip: BlockNumber) -> ProviderResult<usize> {
         let keys = self.keys_to_prune(tip)?;
-        if keys.is_empty() {
-            return Ok(0)
+        if !keys.is_empty() {
+            let mut batch = self.rocksdb.batch();
+            for key in &keys {
+                batch.delete::<tables::BlockAccessLists>(*key)?;
+            }
+            batch.commit()?;
         }
 
-        let mut batch = self.rocksdb.batch();
-        for key in &keys {
-            batch.delete::<tables::BlockAccessLists>(*key)?;
-        }
-        batch.commit()?;
-        self.buffer.write().prune(self.retention, tip);
-        Ok(keys.len())
+        let mut pruned = keys.into_iter().collect::<BTreeSet<_>>();
+        let mut buffer = self.buffer.write();
+        pruned.extend(buffer.prune_cache(self.retention, tip));
+        pruned.extend(buffer.prune_pending(self.retention, tip));
+        Ok(pruned.len())
     }
 
     fn get_by_hashes(&self, hashes: &[BlockHash]) -> ProviderResult<Vec<Option<Bytes>>> {
@@ -330,6 +350,36 @@ mod tests {
 
         assert!(read(&store, canonical).is_some());
         assert_eq!(read(&store, fork), None);
+    }
+
+    #[test]
+    fn cache_eviction_keeps_unflushed_bals_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDBBuilder::new(dir.path()).with_default_tables().build().unwrap();
+        let store = RocksDBBalStore::with_buffer_retention_distance(db, 1);
+        let old = NumHash::new(1, B256::with_last_byte(1));
+        let tip = NumHash::new(3, B256::with_last_byte(3));
+
+        store.insert(old, RawBal::from(Bytes::from_static(&[0xc0]))).unwrap();
+        store.insert(tip, RawBal::from(Bytes::from_static(&[0xc1, 0x03]))).unwrap();
+        store.flush(&[tip]).unwrap();
+        assert!(store.buffer.read().get_by_block(old).is_none());
+
+        store.flush(&[old]).unwrap();
+        assert_eq!(read(&store, old), Some(Bytes::from_static(&[0xc0])));
+    }
+
+    #[test]
+    fn prune_removes_buffer_only_bals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RocksDBBuilder::new(dir.path()).with_default_tables().build().unwrap();
+        let store = RocksDBBalStore::with_retention_distance(db, 2);
+        let old = NumHash::new(7, B256::with_last_byte(1));
+
+        store.insert(old, RawBal::from(Bytes::from_static(&[0xc0]))).unwrap();
+
+        assert_eq!(store.prune(10).unwrap(), 1);
+        assert_eq!(read(&store, old), None);
     }
 
     #[test]
