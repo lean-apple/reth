@@ -292,6 +292,7 @@ impl EngineNodeLauncher {
         let backfill_sync = match snap_header_pipeline {
             Some(header_pipeline) => EitherBackfillSync::Left(SnapPipelineSync::new(
                 header_pipeline,
+                pipeline_sync,
                 network_client.clone(),
                 ctx.provider_factory().clone(),
                 ctx.blockchain_db().bal_store().clone(),

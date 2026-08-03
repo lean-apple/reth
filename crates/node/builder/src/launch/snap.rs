@@ -1,6 +1,6 @@
 //! Snap/2 backfill orchestration.
 
-use reth_engine_tree::backfill::{BackfillAction, BackfillEvent, BackfillSync};
+use reth_engine_tree::backfill::{BackfillAction, BackfillEvent, BackfillSync, PipelineSync};
 use reth_network_p2p::snap::client::SnapClient;
 use reth_provider::{providers::ProviderNodeTypes, BalStoreHandle, ProviderFactory};
 use reth_snap_sync::{ProviderChain, SessionRunOutcome, SnapSyncError, SnapSyncSession};
@@ -32,16 +32,19 @@ pub(crate) const fn should_snap_bootstrap(
 pub(crate) struct SnapPipelineSync<N: ProviderNodeTypes, C> {
     runtime: Runtime,
     header_pipeline: Option<Box<Pipeline<N>>>,
+    fallback: PipelineSync<N>,
     client: C,
     factory: ProviderFactory<N>,
     bal_store: BalStoreHandle,
     pending_target: Option<PipelineTarget>,
+    bootstrapped: bool,
     state: SnapBackfillState<N>,
 }
 
 impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
     pub(crate) fn new(
         header_pipeline: Pipeline<N>,
+        fallback: PipelineSync<N>,
         client: C,
         factory: ProviderFactory<N>,
         bal_store: BalStoreHandle,
@@ -50,10 +53,12 @@ impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
         Self {
             runtime,
             header_pipeline: Some(Box::new(header_pipeline)),
+            fallback,
             client,
             factory,
             bal_store,
             pending_target: None,
+            bootstrapped: false,
             state: SnapBackfillState::Idle,
         }
     }
@@ -138,7 +143,15 @@ impl<N: ProviderNodeTypes, C> SnapPipelineSync<N, C> {
         self.state = SnapBackfillState::Idle;
 
         Poll::Ready(match response {
-            Ok(result) => BackfillEvent::Finished(result),
+            Ok(result) => {
+                if matches!(result, Ok(ControlFlow::Continue { .. })) {
+                    self.bootstrapped = true;
+                    if let Some(target) = self.pending_target.take() {
+                        self.fallback.on_action(BackfillAction::Start(target));
+                    }
+                }
+                BackfillEvent::Finished(result)
+            }
             Err(err) => BackfillEvent::TaskDropped(err.to_string()),
         })
     }
@@ -150,12 +163,19 @@ where
     C: SnapClient + Clone + 'static,
 {
     fn on_action(&mut self, action: BackfillAction) {
+        if self.bootstrapped {
+            self.fallback.on_action(action);
+            return
+        }
         match action {
             BackfillAction::Start(target) => self.set_target(target),
         }
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<BackfillEvent> {
+        if self.bootstrapped {
+            return self.fallback.poll(cx)
+        }
         if let Some(event) = self.try_spawn_headers() {
             return Poll::Ready(event)
         }
