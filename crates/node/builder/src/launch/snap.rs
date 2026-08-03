@@ -77,7 +77,11 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
             return None
         }
         let target = self.pending_target.take()?;
-        let pipeline = self.header_pipeline.take().expect("header pipeline exists while idle");
+        let Some(pipeline) = self.header_pipeline.take() else {
+            let error = "snap header pipeline is unavailable".to_string();
+            self.state = SnapBackfillState::PipelineLost(error.clone());
+            return Some(BackfillEvent::TaskDropped(error))
+        };
         let (tx, rx) = oneshot::channel();
 
         self.runtime.spawn_critical_blocking_task("snap header pipeline", async move {
@@ -101,8 +105,9 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
         let (pipeline, result) = match response {
             Ok(response) => response,
             Err(err) => {
-                self.state = SnapBackfillState::Idle;
-                return Poll::Ready(BackfillEvent::TaskDropped(err.to_string()))
+                let error = err.to_string();
+                self.state = SnapBackfillState::PipelineLost(error.clone());
+                return Poll::Ready(BackfillEvent::TaskDropped(error))
             }
         };
         self.header_pipeline = Some(Box::new(pipeline));
@@ -221,8 +226,9 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
                         }
                     }
                     Err(err) => {
-                        self.state = SnapBackfillState::Idle;
-                        return Poll::Ready(BackfillEvent::TaskDropped(err.to_string()))
+                        let error = err.to_string();
+                        self.state = SnapBackfillState::PipelineLost(error.clone());
+                        return Poll::Ready(BackfillEvent::TaskDropped(error))
                     }
                 }
             }
@@ -235,21 +241,29 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
                 *waiting_for_target = true;
             }
 
-            if !self.try_spawn_head_update() {
-                return Poll::Pending
+            match self.try_spawn_head_update() {
+                Ok(true) => {}
+                Ok(false) => return Poll::Pending,
+                Err(error) => {
+                    self.state = SnapBackfillState::PipelineLost(error.clone());
+                    return Poll::Ready(BackfillEvent::TaskDropped(error))
+                }
             }
         }
     }
 
-    fn try_spawn_head_update(&mut self) -> bool {
+    fn try_spawn_head_update(&mut self) -> Result<bool, String> {
         if !matches!(
             self.state,
             SnapBackfillState::Snap { waiting_for_target: true, header_update: None, .. }
         ) {
-            return false
+            return Ok(false)
         }
-        let Some(target) = self.pending_target.take() else { return false };
-        let pipeline = self.header_pipeline.take().expect("header pipeline is not already running");
+        let Some(target) = self.pending_target.take() else { return Ok(false) };
+        let pipeline = self
+            .header_pipeline
+            .take()
+            .ok_or_else(|| "snap header pipeline is unavailable".to_string())?;
         let (tx, rx) = oneshot::channel();
 
         self.runtime.spawn_critical_blocking_task("snap header update", async move {
@@ -258,7 +272,7 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
         });
         let SnapBackfillState::Snap { header_update, .. } = &mut self.state else { unreachable!() };
         *header_update = Some(rx);
-        true
+        Ok(true)
     }
 
     fn poll_header_update(
@@ -293,6 +307,9 @@ where
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<BackfillEvent> {
         if self.use_fallback {
             return self.fallback.poll(cx)
+        }
+        if let SnapBackfillState::PipelineLost(error) = &self.state {
+            return Poll::Ready(BackfillEvent::TaskDropped(error.clone()))
         }
         if let Some(event) = self.try_spawn_headers() {
             return Poll::Ready(event)
@@ -349,6 +366,7 @@ fn fatal(message: &'static str) -> PipelineError {
 #[derive(Debug)]
 enum SnapBackfillState<N: ProviderNodeTypes> {
     Idle,
+    PipelineLost(String),
     Headers {
         target: PipelineTarget,
         result: oneshot::Receiver<PipelineWithResult<N>>,
