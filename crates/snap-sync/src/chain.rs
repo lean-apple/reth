@@ -17,7 +17,7 @@ use std::{
     future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
-        RwLock,
+        Arc, RwLock,
     },
 };
 
@@ -71,6 +71,27 @@ pub trait CanonicalChainSource: Send + Sync {
         ancestor: B256,
         head: B256,
     ) -> impl Future<Output = Result<Vec<BlockRef>, ChainError>> + Send;
+}
+
+impl<T> CanonicalChainSource for Arc<T>
+where
+    T: CanonicalChainSource + ?Sized,
+{
+    fn head(&self) -> BlockRef {
+        (**self).head()
+    }
+
+    fn canonical_token(&self) -> u64 {
+        (**self).canonical_token()
+    }
+
+    async fn ancestor(&self, from: B256, depth: u64) -> Result<BlockRef, ChainError> {
+        (**self).ancestor(from, depth).await
+    }
+
+    async fn segment(&self, ancestor: B256, head: B256) -> Result<Vec<BlockRef>, ChainError> {
+        (**self).segment(ancestor, head).await
+    }
 }
 
 /// Why the canonical chain could not answer.
@@ -414,7 +435,7 @@ mod tests {
                 .unwrap();
         }
         provider.commit().unwrap();
-        let chain = ProviderChain::new(factory, headers[5].hash_slow()).unwrap();
+        let chain = Arc::new(ProviderChain::new(factory, headers[5].hash_slow()).unwrap());
 
         assert_eq!(
             chain.ancestor(headers[5].hash_slow(), 2).await.unwrap(),
@@ -424,6 +445,9 @@ mod tests {
             chain.segment(headers[2].hash_slow(), headers[5].hash_slow()).await.unwrap(),
             headers[3..6].iter().map(block_ref).collect::<Vec<_>>()
         );
+
+        chain.update_head(headers[4].hash_slow()).unwrap();
+        assert_eq!(CanonicalChainSource::head(&chain), block_ref(&headers[4]));
     }
 
     #[tokio::test]
