@@ -47,6 +47,7 @@ reth-rpc-builder.workspace = true
 reth-rpc-engine-api.workspace = true
 reth-rpc-eth-types.workspace = true
 reth-rpc-layer.workspace = true
+reth-snap-sync.workspace = true
 reth-stages.workspace = true
 reth-static-file.workspace = true
 reth-storage-overlay = { workspace = true, features = ["rayon"] }

@@ -444,11 +444,8 @@ pub struct NetworkArgs {
     #[arg(long, default_value_t = DefaultNetworkArgs::get_global().enforce_enr_fork_id)]
     pub enforce_enr_fork_id: bool,
 
-    /// Advertise the `snap/2` capability (EIP-8189).
-    ///
-    /// Lets peers request account, storage, bytecode and block access list data from this node.
-    /// Off by default: snap is not reth's sync path, and advertising it commits this node to
-    /// answering those requests.
+    /// Enable experimental `snap/2` serving and state bootstrap (EIP-8189).
+    /// Fresh Ethereum v2 databases bootstrap with snap; other databases keep pipeline sync.
     #[arg(long = "snap", default_value_t = DefaultNetworkArgs::get_global().snap)]
     pub snap: bool,
 }

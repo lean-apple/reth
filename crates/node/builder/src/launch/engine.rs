@@ -1,10 +1,11 @@
 //! Engine node related functionality.
 
+use super::snap::{should_snap_bootstrap, SnapPipelineSync};
 use crate::{
     common::{Attached, LaunchContextWith, WithConfigs},
     hooks::NodeHooks,
     rpc::{EngineShutdown, EngineValidatorAddOn, EngineValidatorBuilder, RethRpcAddOns, RpcHandle},
-    setup::build_networked_pipeline,
+    setup::{build_networked_header_pipeline, build_networked_pipeline},
     AddOns, AddOnsContext, FullNode, LaunchContext, LaunchNode, Node, NodeAdapter,
     NodeBuilderWithComponents, NodeComponents, NodeComponentsBuilder, NodeHandle, NodeTypesAdapter,
     RethFullAdapter,
@@ -14,7 +15,7 @@ use futures::{stream::FusedStream, stream_select, FutureExt, StreamExt};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
-    backfill::PipelineSync,
+    backfill::{EitherBackfillSync, PipelineSync},
     chain::{ChainEvent, FromOrchestrator},
     engine::{EngineApiKind, EngineApiRequest, EngineRequestHandler},
     launch::build_engine_orchestrator,
@@ -24,6 +25,7 @@ use reth_engine_util::EngineMessageStreamExt;
 use reth_exex::ExExManagerHandle;
 use reth_network::{types::BlockRangeUpdate, NetworkSyncUpdater, SyncState};
 use reth_network_api::BlockDownloaderProvider;
+use reth_network_p2p::snap::client::SnapClient;
 use reth_node_api::{
     BuiltPayload, ConsensusEngineHandle, FullNodeTypes, NodeTypes, NodeTypesWithDBAdapter,
 };
@@ -36,8 +38,10 @@ use reth_node_core::{
 use reth_node_events::node;
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider},
-    BlockNumReader, StorageSettingsCache,
+    BalProvider, BlockNumReader, StageCheckpointReader, StorageSettingsCache,
 };
+use reth_snap_sync::SnapStateWriter;
+use reth_stages::StageId;
 use reth_storage_overlay::OverlayManager;
 use reth_tasks::TaskExecutor;
 use reth_tokio_util::EventSender;
@@ -82,6 +86,8 @@ impl EngineNodeLauncher {
         CB: NodeComponentsBuilder<T>,
         AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
             + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>,
+        <<CB::Components as NodeComponents<T>>::Network as BlockDownloaderProvider>::Client:
+            SnapClient,
     {
         let Self { ctx, engine_tree_config } = self;
         let NodeBuilderWithComponents {
@@ -150,6 +156,30 @@ impl EngineNodeLauncher {
 
         let node_config = ctx.node_config();
 
+        let interrupted_snap = SnapStateWriter::new(ctx.provider_factory())
+            .interrupted_generation()
+            .map_err(|err| eyre::eyre!(err))?;
+        if interrupted_snap.is_some() && !node_config.network.snap {
+            return Err(eyre::eyre!(
+                "an interrupted snap sync generation exists; restart with --snap"
+            ))
+        }
+
+        let finish = ctx
+            .provider_factory()
+            .get_stage_checkpoint(StageId::Finish)?
+            .map(|checkpoint| checkpoint.block_number)
+            .unwrap_or_default();
+        let genesis = ctx.chain_spec().genesis().number.unwrap_or_default();
+        let snap_bootstrap = should_snap_bootstrap(
+            node_config.network.snap,
+            ctx.chain_spec().is_optimism(),
+            ctx.provider_factory().cached_storage_settings().use_hashed_state(),
+            finish,
+            genesis,
+            interrupted_snap.is_some(),
+        );
+
         // We always assume that node is syncing after a restart
         network_handle.update_sync_state(SyncState::Syncing);
 
@@ -160,6 +190,19 @@ impl EngineNodeLauncher {
         info!(target: "reth::cli", "StaticFileProducer initialized");
 
         let consensus = Arc::new(ctx.components().consensus().clone());
+
+        let snap_header_pipeline = snap_bootstrap.then(|| {
+            build_networked_header_pipeline(
+                &ctx.toml_config().stages,
+                network_client.clone(),
+                consensus.clone(),
+                ctx.provider_factory().clone(),
+                ctx.task_executor(),
+                ctx.sync_metrics_tx(),
+                max_block,
+                static_file_producer.clone(),
+            )
+        });
 
         let pipeline = build_networked_pipeline(
             &ctx.toml_config().stages,
@@ -245,7 +288,17 @@ impl EngineNodeLauncher {
             EngineApiKind::Ethereum
         };
 
-        let backfill_sync = PipelineSync::new(pipeline, ctx.task_executor().clone());
+        let pipeline_sync = PipelineSync::new(pipeline, ctx.task_executor().clone());
+        let backfill_sync = match snap_header_pipeline {
+            Some(header_pipeline) => EitherBackfillSync::Left(SnapPipelineSync::new(
+                header_pipeline,
+                network_client.clone(),
+                ctx.provider_factory().clone(),
+                ctx.blockchain_db().bal_store().clone(),
+                ctx.task_executor().clone(),
+            )),
+            None => EitherBackfillSync::Right(pipeline_sync),
+        };
 
         let mut orchestrator = build_engine_orchestrator(
             engine_kind,
@@ -458,6 +511,7 @@ where
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
         + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>
         + 'static,
+    <<CB::Components as NodeComponents<T>>::Network as BlockDownloaderProvider>::Client: SnapClient,
 {
     type Node = NodeHandle<NodeAdapter<T, CB::Components>, AO>;
     type Future = Pin<Box<dyn Future<Output = eyre::Result<Self::Node>> + Send>>;

@@ -28,17 +28,16 @@ window until new payloads arrive.
 
 ## Syncing with snap/2
 
-The synchronization side — pivot selection, verified state download, access
-list catch-up, and final state-root verification — lives in the
-`reth-snap-sync` crate. It is not yet wired into the node's sync path: there
-is no flag that makes a node bootstrap via snap/2, and the default sync
-behavior is unchanged.
+On a fresh Ethereum v2 database, `--snap` downloads validated headers with
+Reth's header stage, then bootstraps state through `reth-snap-sync`. Existing
+synced databases, legacy v1 databases, and OP Stack nodes retain pipeline
+sync. The feature remains off by default.
 
 Snap sync assembles hashed state, so it requires the v2 storage layout
 (hashed tables as the canonical state representation, the default; see
 [Storage V2](/run/storage)). Legacy v1 databases are rejected before any
 data is touched.
 
-While a downloaded state generation has not been verified and accepted, the
-database carries a `SnapSync` stage marker. A database with this marker
-holds a partial download and must not be treated as a synced node's state.
+While a downloaded generation is incomplete, the database carries a
+`SnapSync` stage marker. Restart with `--snap` to rebuild it safely; launching
+without the flag is rejected until the generation is completed.
