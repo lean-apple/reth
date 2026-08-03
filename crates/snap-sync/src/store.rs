@@ -269,6 +269,10 @@ where
         entries_per_chunk: Option<u64>,
     ) -> Result<(), SnapSyncError> {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        // A retry after the head advances must not reuse trie nodes for the earlier hashed state.
+        // Keeping the clear in this transaction restores the old trie on a mismatch.
+        provider.tx_ref().clear::<tables::AccountsTrie>().map_err(db_err)?;
+        provider.tx_ref().clear::<tables::StoragesTrie>().map_err(db_err)?;
 
         let mut intermediate = None;
         let computed = loop {
@@ -501,6 +505,34 @@ mod tests {
         // One entry per chunk, so the walk resumes from an intermediate state many times over.
         writer.finalize_sync_chunked(100, root, Some(1)).unwrap();
 
+        assert!(!trie_is_empty(&factory));
+    }
+
+    #[test]
+    fn rebuilding_after_more_state_changes_discards_the_previous_trie() {
+        let factory = create_test_provider_factory();
+        let (state, root) = fixture();
+        let writer = SnapStateWriter::new(&factory);
+        writer.write_state(state).unwrap();
+        writer.finalize_sync(100, root).unwrap();
+
+        let replacement = account(999);
+        writer
+            .write_state(HashedPostState {
+                accounts: B256Map::from_iter([(hashed_address(7), Some(replacement))]),
+                storages: B256Map::default(),
+            })
+            .unwrap();
+
+        let slots = [(b256(0x10), U256::from(1)), (b256(0x11), U256::from(2))];
+        let new_root = state_root_prehashed((0..64).map(|i| {
+            let hash = hashed_address(i);
+            let account = if i == 7 { replacement } else { account(i + 1) };
+            let storage = if hash == storage_owner() { slots.to_vec() } else { Vec::new() };
+            (hash, (account, storage))
+        }));
+
+        writer.finalize_sync(101, new_root).unwrap();
         assert!(!trie_is_empty(&factory));
     }
 
