@@ -22,8 +22,11 @@ use reth_network::{
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{args::NetworkArgs, node_config::NodeConfig};
 use reth_node_ethereum::EthereumNode;
-use reth_provider::{HeaderProvider, StateProviderFactory, StateRootProvider};
+use reth_provider::{
+    HeaderProvider, StageCheckpointReader, StateProviderFactory, StateRootProvider,
+};
 use reth_rpc_api::EthApiServer;
+use reth_stages_types::StageId;
 use reth_tasks::Runtime;
 use std::{net::UdpSocket, sync::Arc, time::Duration};
 
@@ -186,7 +189,7 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn can_snap_sync_state_and_resume_live_sync() -> eyre::Result<()> {
+async fn can_snap_sync_state_and_resume_pipeline() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let chain_spec = Arc::new(
@@ -258,6 +261,22 @@ async fn can_snap_sync_state_and_resume_live_sync() -> eyre::Result<()> {
     target.sync_to(pipeline_head).await.wrap_err("syncing the target after snap bootstrap")?;
     tokio::time::timeout(Duration::from_secs(60), target.wait_block(41, pipeline_head, true))
         .await??;
+
+    let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
+    let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
+    assert_eq!(target_root, source_root);
+
+    advance_with_random_transactions(&mut source, 39, &mut rng, true)
+        .await
+        .wrap_err("advancing the source beyond the tree backfill threshold")?;
+    let pipeline_head = source.block_hash(80);
+    target.sync_to(pipeline_head).await.wrap_err("running pipeline after snap bootstrap")?;
+    tokio::time::timeout(Duration::from_secs(120), target.wait_block(80, pipeline_head, true))
+        .await??;
+    assert_eq!(
+        target.inner.provider.get_stage_checkpoint(StageId::Bodies)?.unwrap().block_number,
+        80
+    );
 
     let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
     let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
