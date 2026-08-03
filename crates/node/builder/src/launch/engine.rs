@@ -14,6 +14,7 @@ use futures::{stream::FusedStream, stream_select, FutureExt, StreamExt};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_db::{database_metrics::DatabaseMetrics, Database};
 use reth_engine_tree::{
+    backfill::PipelineSync,
     chain::{ChainEvent, FromOrchestrator},
     engine::{EngineApiKind, EngineApiRequest, EngineRequestHandler},
     launch::build_engine_orchestrator,
@@ -244,13 +245,14 @@ impl EngineNodeLauncher {
             EngineApiKind::Ethereum
         };
 
+        let backfill_sync = PipelineSync::new(pipeline, ctx.task_executor().clone());
+
         let mut orchestrator = build_engine_orchestrator(
             engine_kind,
             consensus.clone(),
             network_client.clone(),
             Box::pin(consensus_engine_stream),
-            pipeline,
-            ctx.task_executor().clone(),
+            backfill_sync,
             ctx.provider_factory().clone(),
             ctx.blockchain_db().clone(),
             pruner,

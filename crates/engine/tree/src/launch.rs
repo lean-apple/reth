@@ -5,7 +5,7 @@
 //! [`ChainOrchestrator`](crate::chain::ChainOrchestrator) ready to be polled as a `Stream`.
 
 use crate::{
-    backfill::PipelineSync,
+    backfill::BackfillSync,
     chain::ChainOrchestrator,
     download::BasicBlockDownloader,
     engine::{EngineApiKind, EngineApiRequest, EngineApiRequestHandler, EngineHandler},
@@ -24,7 +24,7 @@ use reth_provider::{
     ProviderFactory,
 };
 use reth_prune::PrunerWithFactory;
-use reth_stages_api::{MetricEventsSender, Pipeline};
+use reth_stages_api::MetricEventsSender;
 use reth_storage_overlay::OverlayManager;
 use reth_tasks::Runtime;
 use std::sync::Arc;
@@ -40,21 +40,20 @@ use std::sync::Arc;
 ///   (`newPayload`, `forkchoiceUpdated`) and maintains the in-memory chain state.
 /// - **[`EngineApiRequestHandler`]** + **[`EngineHandler`]** — glue that routes incoming CL
 ///   messages to the tree handler and manages download requests.
-/// - **[`PipelineSync`]** — wraps the staged sync [`Pipeline`] for backfill sync when the node
-///   needs to catch up over large block ranges.
+/// - **[`BackfillSync`]** — drives the configured backfill implementation when the node needs to
+///   catch up over large block ranges.
 ///
 /// The returned orchestrator implements [`Stream`] and yields
 /// [`ChainEvent`]s.
 ///
 /// [`ChainEvent`]: crate::chain::ChainEvent
 #[expect(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn build_engine_orchestrator<N, Client, S, V, C>(
+pub fn build_engine_orchestrator<N, Client, S, V, C, B>(
     engine_kind: EngineApiKind,
     consensus: Arc<dyn FullConsensus<N::Primitives>>,
     client: Client,
     incoming_requests: S,
-    pipeline: Pipeline<N>,
-    pipeline_task_spawner: Runtime,
+    backfill_sync: B,
     provider: ProviderFactory<N>,
     blockchain_db: BlockchainProvider<N>,
     pruner: PrunerWithFactory<ProviderFactory<N>>,
@@ -71,7 +70,7 @@ pub fn build_engine_orchestrator<N, Client, S, V, C>(
         S,
         BasicBlockDownloader<Client, <N::Primitives as NodePrimitives>::Block>,
     >,
-    PipelineSync<N>,
+    B,
 >
 where
     N: ProviderNodeTypes,
@@ -79,6 +78,7 @@ where
     S: Stream<Item = BeaconEngineMessage<N::Payload>> + Send + Sync + Unpin + 'static,
     V: EngineValidator<N::Payload> + WaitForCaches,
     C: ConfigureEvm<Primitives = N::Primitives> + 'static,
+    B: BackfillSync + Unpin,
 {
     let downloader = BasicBlockDownloader::new(client, consensus.clone());
 
@@ -103,8 +103,6 @@ where
 
     let engine_handler = EngineApiRequestHandler::new(to_tree_tx, from_tree);
     let handler = EngineHandler::new(engine_handler, downloader, incoming_requests);
-
-    let backfill_sync = PipelineSync::new(pipeline, pipeline_task_spawner);
 
     ChainOrchestrator::new(handler, backfill_sync)
 }
