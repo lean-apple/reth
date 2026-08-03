@@ -60,7 +60,6 @@ where
     }
 
     /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
-    /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
     ///
     /// A served account range is committed in micro-batches: nothing becomes durable until that
     /// batch's accounts, their complete storage and every bytecode they reference are in hand and

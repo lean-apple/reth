@@ -199,9 +199,6 @@ where
     }
 }
 
-// Checks that need neither a client nor a database.
-impl<C, F> StateDownloader<'_, C, F> {}
-
 /// The storage roots committed to by an account range, used to check the storage served for it.
 pub(super) struct StorageRoots(pub(super) B256Map<B256>);
 
