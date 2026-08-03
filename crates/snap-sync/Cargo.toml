@@ -41,7 +41,6 @@ tracing.workspace = true
 [dev-dependencies]
 alloy-trie.workspace = true
 reth-db-api = { workspace = true, features = ["test-utils"] }
-reth-network-p2p = { workspace = true, features = ["test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-trie = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
@@ -50,7 +49,6 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 default = []
 test-utils = [
     "reth-db-api/test-utils",
-    "reth-network-p2p/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-provider/test-utils",
     "reth-trie/test-utils",
