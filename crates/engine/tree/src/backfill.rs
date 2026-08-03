@@ -55,6 +55,35 @@ pub trait BackfillSync: Send {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<BackfillEvent>;
 }
 
+/// One of two backfill implementations selected during node launch.
+#[derive(Debug)]
+pub enum EitherBackfillSync<L, R> {
+    /// Left implementation.
+    Left(L),
+    /// Right implementation.
+    Right(R),
+}
+
+impl<L, R> BackfillSync for EitherBackfillSync<L, R>
+where
+    L: BackfillSync,
+    R: BackfillSync,
+{
+    fn on_action(&mut self, action: BackfillAction) {
+        match self {
+            Self::Left(sync) => sync.on_action(action),
+            Self::Right(sync) => sync.on_action(action),
+        }
+    }
+
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<BackfillEvent> {
+        match self {
+            Self::Left(sync) => sync.poll(cx),
+            Self::Right(sync) => sync.poll(cx),
+        }
+    }
+}
+
 /// The backfill actions that can be performed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackfillAction {
