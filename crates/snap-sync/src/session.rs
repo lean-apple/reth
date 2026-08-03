@@ -23,7 +23,7 @@ use reth_network_p2p::{
     error::RequestError,
     snap::client::{SnapClient, SnapResponse},
 };
-use reth_provider::DatabaseProviderFactory;
+use reth_provider::{DatabaseProviderFactory, StaticFileProviderFactory};
 use reth_storage_api::{
     BalStoreHandle, DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache,
     TrieWriter,
@@ -475,7 +475,7 @@ where
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StageCheckpointWriter + StateWriter,
+    F::ProviderRW: DBProvider + StageCheckpointWriter + StateWriter + StaticFileProviderFactory,
     <F::ProviderRW as DBProvider>::Tx: DbTxMut,
 {
     /// Clears the generation marker after the node has installed the verified head.

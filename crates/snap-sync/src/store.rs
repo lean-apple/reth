@@ -7,7 +7,9 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::{Account, Bytecode};
-use reth_provider::DatabaseProviderFactory;
+use reth_provider::{
+    DatabaseProviderFactory, StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
+};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
     DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache, TrieWriter,
@@ -152,10 +154,10 @@ where
         Ok(())
     }
 
-    /// Accepts the state and advances Reth's pipeline checkpoints in one commit.
+    /// Accepts the state and aligns Reth's pipeline and static-file frontiers with it.
     pub fn accept_generation(&self, block_number: u64) -> Result<(), SnapSyncError>
     where
-        F::ProviderRW: StageCheckpointWriter,
+        F::ProviderRW: StageCheckpointWriter + StaticFileProviderFactory,
     {
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
         provider.update_pipeline_stages(block_number, false).map_err(db_err)?;
@@ -166,6 +168,24 @@ where
             tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
                 .map_err(db_err)?;
         }
+
+        // Snap supplies state but not historical block data. Empty advancement lets the normal
+        // persistence path append the first post-snap block without a static-file gap.
+        let static_files = provider.static_file_provider();
+        for segment in [
+            StaticFileSegment::Transactions,
+            StaticFileSegment::TransactionSenders,
+            StaticFileSegment::Receipts,
+            StaticFileSegment::AccountChangeSets,
+            StaticFileSegment::StorageChangeSets,
+        ] {
+            static_files
+                .latest_writer(segment)
+                .map_err(db_err)?
+                .ensure_at_block(block_number)
+                .map_err(db_err)?;
+        }
+        static_files.commit().map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
     }
@@ -347,7 +367,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{map::B256Map, U256};
     use reth_db_api::cursor::DbCursorRO;
-    use reth_provider::test_utils::create_test_provider_factory;
+    use reth_provider::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
     use reth_storage_api::StageCheckpointReader;
     use reth_trie::{test_utils::state_root_prehashed, HashedStorage};
 
@@ -495,6 +515,16 @@ mod tests {
         let provider = factory.database_provider_ro().unwrap();
         for stage in StageId::ALL {
             assert_eq!(provider.get_stage_checkpoint(stage).unwrap().unwrap().block_number, 4242);
+        }
+        let static_files = provider.static_file_provider();
+        for segment in [
+            StaticFileSegment::Transactions,
+            StaticFileSegment::TransactionSenders,
+            StaticFileSegment::Receipts,
+            StaticFileSegment::AccountChangeSets,
+            StaticFileSegment::StorageChangeSets,
+        ] {
+            assert_eq!(static_files.get_highest_static_file_block(segment), Some(4242));
         }
     }
 
