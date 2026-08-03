@@ -1,4 +1,6 @@
-use crate::utils::{advance_with_random_transactions, eth_payload_attributes};
+use crate::utils::{
+    advance_with_random_transactions, eth_payload_attributes, eth_payload_attributes_amsterdam,
+};
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::Encodable2718;
 use alloy_network::TxSignerSync;
@@ -8,12 +10,13 @@ use rand::{rngs::StdRng, seq::IndexedRandom, Rng, SeedableRng};
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
 use reth_e2e_test_utils::{
     setup, setup_engine, setup_engine_with_connection, transaction::TransactionTestContext,
-    wallet::Wallet,
+    wallet::Wallet, E2ETestSetupBuilder,
 };
 use reth_network::{NetworkInfo, PeersInfo};
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{args::NetworkArgs, node_config::NodeConfig};
 use reth_node_ethereum::EthereumNode;
+use reth_provider::{StateProviderFactory, StateRootProvider};
 use reth_rpc_api::EthApiServer;
 use reth_tasks::Runtime;
 use std::{net::UdpSocket, sync::Arc, time::Duration};
@@ -172,6 +175,66 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
     let head = provider.get_block_by_number(Default::default()).await?.unwrap().header.hash;
 
     second_node.sync_to(head).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn can_snap_sync_state_and_resume_pipeline() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            .cancun_activated()
+            .prague_activated()
+            .amsterdam_activated()
+            .build(),
+    );
+    let (mut nodes, _) = E2ETestSetupBuilder::<EthereumNode, _>::new(
+        2,
+        chain_spec,
+        eth_payload_attributes_amsterdam,
+    )
+    .with_connect_nodes(false)
+    .with_tree_config_modifier(|config| {
+        config.with_persistence_threshold(0).with_memory_block_buffer_target(0)
+    })
+    .with_node_config_modifier(|mut config| {
+        config.storage.v2 = true;
+        config.network.snap = true;
+        config
+    })
+    .build()
+    .await?;
+
+    let mut target = nodes.pop().unwrap();
+    let mut source = nodes.pop().unwrap();
+    let mut rng = StdRng::from_seed([0x81; 32]);
+    advance_with_random_transactions(&mut source, 20, &mut rng, true).await?;
+    let snap_head = source.block_hash(20);
+
+    target.connect(&mut source).await;
+    target.sync_to(snap_head).await?;
+    tokio::time::timeout(Duration::from_secs(60), target.wait_block(20, snap_head, true)).await??;
+
+    let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
+    let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
+    assert_eq!(target_root, source_root);
+
+    advance_with_random_transactions(&mut source, 1, &mut rng, true).await?;
+    let pipeline_head = source.block_hash(21);
+    target.sync_to(pipeline_head).await?;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        target.wait_block(21, pipeline_head, true),
+    )
+    .await??;
+
+    let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
+    let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
+    assert_eq!(target_root, source_root);
 
     Ok(())
 }
