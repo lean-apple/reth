@@ -91,9 +91,8 @@ where
                     self.start().await?;
                 }
                 SyncState::Downloading { .. } => match self.download().await? {
-                    StepOutcome::Advanced => {}
+                    StepOutcome::Advanced | StepOutcome::Reorged => {}
                     StepOutcome::WaitingForPeers => return Ok(SessionRunOutcome::WaitingForPeers),
-                    StepOutcome::Reorged => {}
                     StepOutcome::TargetStale => match self.advance_target().await? {
                         StepOutcome::Advanced | StepOutcome::Reorged => {}
                         StepOutcome::WaitingForPeers => {
@@ -339,7 +338,7 @@ where
             return Err(SnapSyncError::BalNotActive(head.number))
         }
 
-        let depth = PIVOT_OFFSET.min(head.number);
+        let depth = pivot_depth(head.number);
         let initial = self
             .chain
             .ancestor(head.hash, depth)
@@ -542,6 +541,14 @@ fn bal_capable_target(initial: BlockRef, catch_up: &[BlockRef]) -> BlockRef {
     catch_up.iter().rfind(|block| block.bal_hash.is_none()).copied().unwrap_or(initial)
 }
 
+const fn pivot_depth(head: u64) -> u64 {
+    if head < PIVOT_OFFSET {
+        head
+    } else {
+        PIVOT_OFFSET
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,8 +664,8 @@ mod tests {
 
     #[test]
     fn pivot_depth_never_exceeds_a_short_chain() {
-        assert_eq!(PIVOT_OFFSET.min(3), 3);
-        assert_eq!(PIVOT_OFFSET.min(0), 0);
+        assert_eq!(pivot_depth(3), 3);
+        assert_eq!(pivot_depth(0), 0);
     }
 
     #[test]

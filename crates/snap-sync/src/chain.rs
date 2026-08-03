@@ -238,7 +238,7 @@ where
     C: HeadersClient<Header: reth_primitives_traits::BlockHeader>,
 {
     /// Creates a chain source anchored at an already-resolved head.
-    pub fn new(client: C, head: BlockRef) -> Self {
+    pub const fn new(client: C, head: BlockRef) -> Self {
         Self { client, head: RwLock::new(head), token: AtomicU64::new(0) }
     }
 
