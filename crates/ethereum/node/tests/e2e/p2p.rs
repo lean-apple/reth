@@ -4,7 +4,9 @@ use crate::utils::{
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy_eips::Encodable2718;
 use alloy_network::TxSignerSync;
+use alloy_primitives::keccak256;
 use alloy_provider::{Provider, ProviderBuilder};
+use eyre::WrapErr;
 use futures::future::JoinAll;
 use rand::{rngs::StdRng, seq::IndexedRandom, Rng, SeedableRng};
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
@@ -12,11 +14,15 @@ use reth_e2e_test_utils::{
     setup, setup_engine, setup_engine_with_connection, transaction::TransactionTestContext,
     wallet::Wallet, E2ETestSetupBuilder,
 };
-use reth_network::{NetworkInfo, PeersInfo};
+use reth_network::{
+    p2p::snap::client::{SnapClient, SnapResponse},
+    types::snap::{BlockAccessListsMessage, GetBlockAccessListsMessage},
+    BlockDownloaderProvider, NetworkInfo, PeersInfo,
+};
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{args::NetworkArgs, node_config::NodeConfig};
 use reth_node_ethereum::EthereumNode;
-use reth_provider::{StateProviderFactory, StateRootProvider};
+use reth_provider::{HeaderProvider, StateProviderFactory, StateRootProvider};
 use reth_rpc_api::EthApiServer;
 use reth_tasks::Runtime;
 use std::{net::UdpSocket, sync::Arc, time::Duration};
@@ -180,7 +186,7 @@ async fn e2e_test_send_transactions() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn can_snap_sync_state_and_resume_pipeline() -> eyre::Result<()> {
+async fn can_snap_sync_state_and_resume_live_sync() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let chain_spec = Arc::new(
@@ -212,25 +218,46 @@ async fn can_snap_sync_state_and_resume_pipeline() -> eyre::Result<()> {
     let mut target = nodes.pop().unwrap();
     let mut source = nodes.pop().unwrap();
     let mut rng = StdRng::from_seed([0x81; 32]);
-    advance_with_random_transactions(&mut source, 20, &mut rng, true).await?;
-    let snap_head = source.block_hash(20);
+    advance_with_random_transactions(&mut source, 40, &mut rng, true).await?;
+    let snap_head = source.block_hash(40);
 
     target.connect(&mut source).await;
     target.sync_to(snap_head).await?;
-    tokio::time::timeout(Duration::from_secs(60), target.wait_block(20, snap_head, true)).await??;
+    tokio::time::timeout(Duration::from_secs(60), target.wait_block(40, snap_head, true)).await??;
 
     let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
     let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
     assert_eq!(target_root, source_root);
 
-    advance_with_random_transactions(&mut source, 1, &mut rng, true).await?;
-    let pipeline_head = source.block_hash(21);
-    target.sync_to(pipeline_head).await?;
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        target.wait_block(21, pipeline_head, true),
-    )
-    .await??;
+    let response = source
+        .inner
+        .network
+        .fetch_client()
+        .await?
+        .get_block_access_lists(GetBlockAccessListsMessage {
+            request_id: 8189,
+            block_hashes: vec![snap_head],
+            response_bytes: 2 * 1024 * 1024,
+        })
+        .await?
+        .into_data();
+    let SnapResponse::BlockAccessLists(BlockAccessListsMessage { request_id, block_access_lists }) =
+        response
+    else {
+        panic!("expected a block access lists response")
+    };
+    assert_eq!(request_id, 8189);
+    let bal = block_access_lists.0.into_iter().next().flatten().expect("BAL should be served");
+    let header = source.inner.provider.header(snap_head)?.expect("snap head should exist");
+    assert_eq!(Some(keccak256(bal)), header.block_access_list_hash);
+
+    advance_with_random_transactions(&mut source, 1, &mut rng, true)
+        .await
+        .wrap_err("advancing the source after snap bootstrap")?;
+    let pipeline_head = source.block_hash(41);
+    target.sync_to(pipeline_head).await.wrap_err("syncing the target after snap bootstrap")?;
+    tokio::time::timeout(Duration::from_secs(60), target.wait_block(41, pipeline_head, true))
+        .await??;
 
     let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
     let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
