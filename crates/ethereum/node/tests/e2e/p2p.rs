@@ -286,6 +286,59 @@ async fn can_snap_sync_state_and_resume_pipeline() -> eyre::Result<()> {
 }
 
 #[tokio::test]
+async fn can_advance_a_stale_snap_pivot() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            .cancun_activated()
+            .prague_activated()
+            .amsterdam_activated()
+            .build(),
+    );
+    let (mut nodes, _) = E2ETestSetupBuilder::<EthereumNode, _>::new(
+        2,
+        chain_spec,
+        eth_payload_attributes_amsterdam,
+    )
+    .with_connect_nodes(false)
+    .with_tree_config_modifier(|config| {
+        config.with_persistence_threshold(0).with_memory_block_buffer_target(0)
+    })
+    .with_node_config_modifier(|mut config| {
+        config.storage.v2 = true;
+        config.network.snap = true;
+        config
+    })
+    .build()
+    .await?;
+
+    let mut target = nodes.pop().unwrap();
+    let mut source = nodes.pop().unwrap();
+    let mut rng = StdRng::from_seed([0x82; 32]);
+
+    // Block 20 selects pivot 4. At source head 140 that root is outside the 128-block window.
+    advance_with_random_transactions(&mut source, 140, &mut rng, true).await?;
+    let stale_head = source.block_hash(20);
+    target.connect(&mut source).await;
+    target.update_forkchoice(stale_head, stale_head).await?;
+
+    advance_with_random_transactions(&mut source, 2, &mut rng, true).await?;
+    let fresh_head = source.block_hash(142);
+    target.sync_to(fresh_head).await?;
+    tokio::time::timeout(Duration::from_secs(180), target.wait_block(142, fresh_head, true))
+        .await??;
+
+    let source_root = source.inner.provider.latest()?.state_root(Default::default())?;
+    let target_root = target.inner.provider.latest()?.state_root(Default::default())?;
+    assert_eq!(target_root, source_root);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_long_reorg() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
