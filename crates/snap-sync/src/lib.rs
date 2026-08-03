@@ -37,7 +37,7 @@ pub mod store;
 mod metrics;
 mod proof;
 
-pub use chain::{BlockRef, CanonicalChainSource, ChainError, HeaderChain};
+pub use chain::{BlockRef, CanonicalChainSource, ChainError, HeaderChain, ProviderChain};
 pub use download::{DownloadStateOutcome, StateDownloader};
 pub use error::SnapSyncError;
 pub use session::{SessionRunOutcome, SnapSyncSession, StepOutcome, SyncState};

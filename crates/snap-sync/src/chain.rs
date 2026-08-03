@@ -12,7 +12,14 @@ use alloy_consensus::BlockHeader as _;
 use alloy_primitives::{BlockNumber, Sealable as _, B256};
 use reth_eth_wire_types::HeadersDirection;
 use reth_network_p2p::headers::client::{HeadersClient, HeadersRequest};
-use std::future::Future;
+use reth_provider::{DatabaseProviderFactory, HeaderProvider};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        RwLock,
+    },
+};
 
 /// A block identified by hash, with the height and links a session needs to order and connect it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +90,104 @@ pub enum ChainError {
     /// Headers could not be fetched from any peer.
     #[error("header download failed: {0}")]
     Download(String),
+    /// Persisted headers could not be read.
+    #[error("canonical header provider failed: {0}")]
+    Provider(String),
+}
+
+/// Canonical chain source backed by Reth's persisted, validated headers.
+#[derive(Debug)]
+pub struct ProviderChain<F> {
+    factory: F,
+    head: RwLock<BlockRef>,
+    token: AtomicU64,
+}
+
+impl<F> ProviderChain<F>
+where
+    F: DatabaseProviderFactory,
+    F::Provider: HeaderProvider,
+{
+    /// Opens a chain source at a header already stored by the header stage.
+    pub fn new(factory: F, head: B256) -> Result<Self, ChainError> {
+        let head = Self::block_by_hash(&factory, head)?;
+        Ok(Self { factory, head: RwLock::new(head), token: AtomicU64::new(0) })
+    }
+
+    /// Moves forkchoice to another persisted header.
+    pub fn update_head(&self, hash: B256) -> Result<BlockRef, ChainError> {
+        if self.head.read().expect("head lock poisoned").hash == hash {
+            return Ok(*self.head.read().expect("head lock poisoned"))
+        }
+
+        let head = Self::block_by_hash(&self.factory, hash)?;
+        *self.head.write().expect("head lock poisoned") = head;
+        self.token.fetch_add(1, Ordering::Release);
+        Ok(head)
+    }
+
+    fn block_by_hash(factory: &F, hash: B256) -> Result<BlockRef, ChainError> {
+        let provider =
+            factory.database_provider_ro().map_err(|err| ChainError::Provider(err.to_string()))?;
+        let header = provider
+            .sealed_header_by_hash(hash)
+            .map_err(|err| ChainError::Provider(err.to_string()))?
+            .ok_or(ChainError::UnknownBlock(hash))?;
+
+        Ok(BlockRef {
+            hash: header.hash(),
+            number: header.number(),
+            parent_hash: header.parent_hash(),
+            state_root: header.state_root(),
+            bal_hash: header.block_access_list_hash(),
+        })
+    }
+}
+
+impl<F> CanonicalChainSource for ProviderChain<F>
+where
+    F: DatabaseProviderFactory,
+    F::Provider: HeaderProvider,
+{
+    fn head(&self) -> BlockRef {
+        *self.head.read().expect("head lock poisoned")
+    }
+
+    fn canonical_token(&self) -> u64 {
+        self.token.load(Ordering::Acquire)
+    }
+
+    async fn ancestor(&self, from: B256, depth: u64) -> Result<BlockRef, ChainError> {
+        let mut block = Self::block_by_hash(&self.factory, from)?;
+        for _ in 0..depth {
+            block = Self::block_by_hash(&self.factory, block.parent_hash)?;
+        }
+        Ok(block)
+    }
+
+    async fn segment(&self, ancestor: B256, head: B256) -> Result<Vec<BlockRef>, ChainError> {
+        if ancestor == head {
+            return Ok(Vec::new())
+        }
+
+        let anchor = Self::block_by_hash(&self.factory, ancestor)?;
+        let mut block = Self::block_by_hash(&self.factory, head)?;
+        if anchor.number >= block.number {
+            return Err(ChainError::NotAnAncestor { ancestor, head })
+        }
+
+        let mut blocks = Vec::with_capacity((block.number - anchor.number) as usize);
+        while block.number > anchor.number {
+            blocks.push(block);
+            block = Self::block_by_hash(&self.factory, block.parent_hash)?;
+        }
+        if block.hash != ancestor {
+            return Err(ChainError::NotAnAncestor { ancestor, head })
+        }
+
+        blocks.reverse();
+        Ok(blocks)
+    }
 }
 
 /// A [`CanonicalChainSource`] for a node that has no chain of its own yet.
@@ -96,9 +201,9 @@ pub struct HeaderChain<C> {
     /// Peer client every header comes from.
     client: C,
     /// The last head forkchoice reported, resolved to a full reference.
-    head: std::sync::RwLock<BlockRef>,
+    head: RwLock<BlockRef>,
     /// Bumped whenever the head moves; see [`CanonicalChainSource::canonical_token`].
-    token: std::sync::atomic::AtomicU64,
+    token: AtomicU64,
 }
 
 /// Headers asked of a peer in one request.
@@ -113,11 +218,7 @@ where
 {
     /// Creates a chain source anchored at an already-resolved head.
     pub fn new(client: C, head: BlockRef) -> Self {
-        Self {
-            client,
-            head: std::sync::RwLock::new(head),
-            token: std::sync::atomic::AtomicU64::new(0),
-        }
+        Self { client, head: RwLock::new(head), token: AtomicU64::new(0) }
     }
 
     /// Moves the head to `hash`, resolving its header from peers.
@@ -130,7 +231,7 @@ where
 
         let head = self.block_by_hash(hash).await?;
         *self.head.write().expect("head lock poisoned") = head;
-        self.token.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.token.fetch_add(1, Ordering::Release);
         Ok(head)
     }
 
@@ -219,7 +320,7 @@ where
     }
 
     fn canonical_token(&self) -> u64 {
-        self.token.load(std::sync::atomic::Ordering::Acquire)
+        self.token.load(Ordering::Acquire)
     }
 
     async fn ancestor(&self, from: B256, depth: u64) -> Result<BlockRef, ChainError> {
@@ -254,7 +355,13 @@ where
 mod tests {
     use super::*;
     use alloy_consensus::Header;
+    use reth_db_api::{tables, transaction::DbTxMut};
     use reth_network_p2p::test_utils::TestHeadersClient;
+    use reth_provider::{
+        test_utils::create_test_provider_factory, StaticFileProviderFactory, StaticFileSegment,
+        StaticFileWriter,
+    };
+    use reth_storage_api::DBProvider;
 
     /// A linked chain of `len` headers from genesis, each with a distinct state root.
     fn header_chain(len: u64) -> Vec<Header> {
@@ -286,6 +393,37 @@ mod tests {
     /// Queues `headers` as one falling response.
     async fn queue_falling(client: &TestHeadersClient, headers: &[Header]) {
         client.extend(headers.iter().rev().cloned()).await;
+    }
+
+    #[tokio::test]
+    async fn provider_chain_walks_headers_persisted_by_reth() {
+        let headers = header_chain(6);
+        let factory = create_test_provider_factory();
+        {
+            let static_files = factory.static_file_provider();
+            let mut writer = static_files.latest_writer(StaticFileSegment::Headers).unwrap();
+            for header in &headers {
+                writer.append_header(header, &header.hash_slow()).unwrap();
+            }
+        }
+        let provider = factory.database_provider_rw().unwrap();
+        for header in &headers {
+            provider
+                .tx_ref()
+                .put::<tables::HeaderNumbers>(header.hash_slow(), header.number)
+                .unwrap();
+        }
+        provider.commit().unwrap();
+        let chain = ProviderChain::new(factory, headers[5].hash_slow()).unwrap();
+
+        assert_eq!(
+            chain.ancestor(headers[5].hash_slow(), 2).await.unwrap(),
+            block_ref(&headers[3])
+        );
+        assert_eq!(
+            chain.segment(headers[2].hash_slow(), headers[5].hash_slow()).await.unwrap(),
+            headers[3..6].iter().map(block_ref).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
