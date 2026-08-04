@@ -39,7 +39,9 @@ use reth_trie::{
     prefix_set::TriePrefixSets, IntermediateStateRootState, StateRoot as StateRootComputer,
     StateRootProgress,
 };
-use reth_trie_db::DatabaseStateRoot;
+use reth_trie_db::{
+    state_root_with_committed_updates, DatabaseStateRoot, STATE_ROOT_COMMIT_THRESHOLD,
+};
 
 type DbStateRoot<'a, TX, A> = StateRootComputer<
     reth_trie_db::DatabaseTrieCursorFactory<&'a TX, A>,
@@ -68,9 +70,6 @@ const SOFT_LIMIT_COUNT_FLUSHED_UPDATES: usize = 1_000_000;
 /// the current MDBX transaction and opening a new one. This bounds dirty page accumulation
 /// and prevents OOM on large state imports.
 const STORAGE_COMMIT_THRESHOLD: usize = 100_000;
-
-/// Max number of trie updates retained before init-state state root computation commits progress.
-const STATE_ROOT_COMMIT_THRESHOLD: u64 = 25_000;
 
 /// Storage initialization error type.
 #[derive(Debug, thiserror::Error, Clone)]
@@ -601,7 +600,8 @@ where
     }
 
     // compute and compare state root
-    let computed_state_root = compute_state_root_chunked(provider_factory)?;
+    let computed_state_root =
+        state_root_with_committed_updates(provider_factory, STATE_ROOT_COMMIT_THRESHOLD)?;
     if computed_state_root == expected_state_root {
         info!(target: "reth::cli",
             ?computed_state_root,
@@ -1192,82 +1192,6 @@ where
             }
         }
     }
-}
-
-/// Computes the state root (from scratch) with periodic commits to free MDBX dirty pages.
-///
-/// Opens a fresh transaction each iteration to release dirty pages, preventing OOM on large
-/// states where trie updates accumulate gigabytes of MDBX dirty pages.
-fn compute_state_root_chunked<PF>(provider_factory: &PF) -> Result<B256, InitStorageError>
-where
-    PF: DatabaseProviderFactory<
-        ProviderRW: DBProvider<Tx: DbTxMut> + TrieWriter + StorageSettingsCache,
-    >,
-{
-    let provider_rw = provider_factory.database_provider_rw().map_err(provider_db_err)?;
-
-    reth_trie_db::with_adapter!(&provider_rw, |A| {
-        drop(provider_rw);
-        compute_state_root_chunked_inner::<PF, A>(provider_factory)
-    })
-}
-
-fn compute_state_root_chunked_inner<PF, A>(provider_factory: &PF) -> Result<B256, InitStorageError>
-where
-    PF: DatabaseProviderFactory<
-        ProviderRW: DBProvider<Tx: DbTxMut> + TrieWriter + StorageSettingsCache,
-    >,
-    A: reth_trie_db::TrieTableAdapter,
-{
-    trace!(target: "reth::cli", "Computing state root");
-
-    let mut intermediate_state: Option<IntermediateStateRootState> = None;
-    let mut total_flushed_updates = 0;
-
-    loop {
-        let provider_rw = provider_factory.database_provider_rw().map_err(provider_db_err)?;
-        let tx = provider_rw.tx_ref();
-
-        let state_root = DbStateRoot::<_, A>::from_tx(tx)
-            .with_intermediate_state(intermediate_state.take())
-            .with_threshold(STATE_ROOT_COMMIT_THRESHOLD);
-
-        match state_root.root_with_progress()? {
-            StateRootProgress::Progress(state, _, updates) => {
-                let updated_len = provider_rw.write_trie_updates(updates)?;
-                total_flushed_updates += updated_len;
-
-                info!(target: "reth::cli",
-                    last_account_key = %state.account_root_state.last_hashed_key,
-                    updated_len,
-                    total_flushed_updates,
-                    "Flushing trie updates (committing to free memory)"
-                );
-
-                intermediate_state = Some(*state);
-                provider_rw.commit().map_err(provider_db_err)?;
-            }
-            StateRootProgress::Complete(root, _, updates) => {
-                let updated_len = provider_rw.write_trie_updates(updates)?;
-                total_flushed_updates += updated_len;
-
-                info!(target: "reth::cli",
-                    %root,
-                    updated_len,
-                    total_flushed_updates,
-                    "State root computation complete"
-                );
-
-                provider_rw.commit().map_err(provider_db_err)?;
-                return Ok(root)
-            }
-        }
-    }
-}
-
-/// Converts a provider error into an [`InitStorageError`].
-fn provider_db_err(e: impl std::fmt::Display) -> InitStorageError {
-    InitStorageError::from(StateRootError::Database(DatabaseError::Other(e.to_string())))
 }
 
 /// Type to deserialize state root from state dump file.

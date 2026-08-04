@@ -15,8 +15,8 @@ use reth_storage_api::{
     AccountExtReader, DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache,
     TrieWriter,
 };
-use reth_trie::{HashedPostState, StateRoot, StateRootProgress};
-use reth_trie_db::DatabaseStateRoot;
+use reth_trie::HashedPostState;
+use reth_trie_db::{state_root_with_committed_updates, STATE_ROOT_COMMIT_THRESHOLD};
 
 /// Stage slot marking a snap sync generation whose state root has not been checked yet.
 ///
@@ -259,71 +259,47 @@ where
     /// The same pass produces the intermediate trie nodes, which are written on success because
     /// the node cannot serve proofs or extend the chain from hashed state alone.
     ///
-    /// The walk is chunked so peak memory does not scale with total state size. All chunks share
-    /// one transaction, committed only once the root matches.
+    /// Trie updates are committed in chunks while the generation marker keeps them untrusted.
+    /// This bounds MDBX dirty pages and makes each completed chunk crash-durable.
     pub fn finalize_sync(&self, block_number: u64, expected: B256) -> Result<(), SnapSyncError> {
         self.finalize_sync_chunked(block_number, expected, None)
     }
 
     /// [`Self::finalize_sync`], with an explicit number of hashed entries per chunk.
     ///
-    /// `None` keeps the trie crate's default. Only the chunk size varies: the root, the written
-    /// nodes and the all-or-nothing commit are identical whatever it is.
+    /// `None` uses Reth's shared state-root commit threshold.
     fn finalize_sync_chunked(
         &self,
         block_number: u64,
         expected: B256,
         entries_per_chunk: Option<u64>,
     ) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        // A retry after the head advances must not reuse trie nodes for the earlier hashed state.
-        // Keeping the clear in this transaction restores the old trie on a mismatch.
-        provider.tx_ref().clear::<tables::AccountsTrie>().map_err(db_err)?;
-        provider.tx_ref().clear::<tables::StoragesTrie>().map_err(db_err)?;
-
-        let mut intermediate = None;
-        let computed = loop {
-            let progress = reth_trie_db::with_adapter!(provider, |A| {
-                let mut state_root = DbStateRoot::<_, A>::from_tx(provider.tx_ref())
-                    .with_intermediate_state(intermediate.take());
-                if let Some(entries) = entries_per_chunk {
-                    state_root = state_root.with_threshold(entries);
-                }
-                state_root.root_with_progress()
-            })
-            .map_err(|err| SnapSyncError::Database(format!("state root computation: {err}")))?;
-
-            match progress {
-                StateRootProgress::Progress(state, _, updates) => {
-                    provider.write_trie_updates(updates).map_err(db_err)?;
-                    intermediate = Some(*state);
-                }
-                StateRootProgress::Complete(root, _, updates) => {
-                    provider.write_trie_updates(updates).map_err(db_err)?;
-                    break root
-                }
-            }
-        };
+        self.clear_trie()?;
+        let computed = state_root_with_committed_updates(
+            self.factory,
+            entries_per_chunk.unwrap_or(STATE_ROOT_COMMIT_THRESHOLD),
+        )
+        .map_err(|err| SnapSyncError::Database(format!("state root computation: {err}")))?;
 
         if computed != expected {
-            // Dropping the provider without committing discards every chunk written above, so a
-            // retry at a later pivot starts from the hashed state rather than a half-built trie.
+            self.clear_trie()?;
             return Err(SnapSyncError::StateRootMismatch { block: block_number, expected, computed })
         }
 
         // The generation marker is deliberately left in place: a matching root proves the state
         // is block `block_number`'s, not that the node accepted it — the block can have been
         // orphaned while the trie was being walked.
+        Ok(())
+    }
+
+    fn clear_trie(&self) -> Result<(), SnapSyncError> {
+        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        provider.tx_ref().clear::<tables::AccountsTrie>().map_err(db_err)?;
+        provider.tx_ref().clear::<tables::StoragesTrie>().map_err(db_err)?;
         provider.commit().map_err(db_err)?;
         Ok(())
     }
 }
-
-/// State root calculator over the database's hashed-state tables.
-type DbStateRoot<'a, TX, A> = StateRoot<
-    reth_trie_db::DatabaseTrieCursorFactory<&'a TX, A>,
-    reth_trie_db::DatabaseHashedCursorFactory<&'a TX>,
->;
 
 fn db_err(err: impl core::fmt::Display) -> SnapSyncError {
     SnapSyncError::Database(err.to_string())
@@ -334,9 +310,12 @@ mod tests {
     use super::*;
     use alloy_primitives::{map::B256Map, U256};
     use reth_db_api::cursor::DbCursorRO;
-    use reth_provider::{test_utils::create_test_provider_factory, StaticFileProviderFactory};
+    use reth_provider::{
+        test_utils::create_test_provider_factory, ProviderError, StaticFileProviderFactory,
+    };
     use reth_storage_api::StageCheckpointReader;
     use reth_trie::{test_utils::state_root_prehashed, HashedStorage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn b256(value: u64) -> B256 {
         B256::left_padding_from(&value.to_be_bytes())
@@ -392,6 +371,36 @@ mod tests {
         let provider = factory.database_provider_ro().unwrap();
         let mut cursor = provider.tx_ref().cursor_read::<tables::AccountsTrie>().unwrap();
         cursor.first().unwrap().is_none()
+    }
+
+    #[derive(Debug)]
+    struct LimitedRwFactory<F> {
+        inner: F,
+        remaining: AtomicUsize,
+    }
+
+    impl<F> DatabaseProviderFactory for LimitedRwFactory<F>
+    where
+        F: DatabaseProviderFactory,
+    {
+        type DB = F::DB;
+        type Provider = F::Provider;
+        type ProviderRW = F::ProviderRW;
+
+        fn database_provider_ro(&self) -> Result<Self::Provider, ProviderError> {
+            self.inner.database_provider_ro()
+        }
+
+        fn database_provider_rw(&self) -> Result<Self::ProviderRW, ProviderError> {
+            self.remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .map_err(|_| {
+                    ProviderError::other(std::io::Error::other("injected interruption"))
+                })?;
+            self.inner.database_provider_rw()
+        }
     }
 
     #[test]
@@ -585,6 +594,31 @@ mod tests {
             Err(SnapSyncError::StateRootMismatch { .. })
         ));
         assert!(trie_is_empty(&factory));
+    }
+
+    #[test]
+    fn interrupted_chunked_rebuild_stays_marked_until_restart_clears_it() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(reth_db_api::models::StorageSettings::v2());
+        let (state, root) = fixture();
+        let writer = SnapStateWriter::new(&factory);
+        writer.begin_generation(generation(100)).unwrap();
+        writer.commit_batch(state, &[]).unwrap();
+
+        // Clear, adapter selection, and one rebuild chunk succeed before the injected failure.
+        let limited = LimitedRwFactory { inner: factory, remaining: AtomicUsize::new(3) };
+        assert!(matches!(
+            SnapStateWriter::new(&limited).finalize_sync_chunked(100, root, Some(1)),
+            Err(SnapSyncError::Database(_))
+        ));
+        assert!(!trie_is_empty(&limited));
+        assert_eq!(
+            SnapStateWriter::new(&limited).interrupted_generation().unwrap(),
+            Some(generation(100))
+        );
+
+        SnapStateWriter::new(&limited.inner).begin_generation(generation(100)).unwrap();
+        assert!(trie_is_empty(&limited.inner));
     }
 
     #[test]
