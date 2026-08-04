@@ -16,18 +16,6 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-/// Returns whether this database should use snap for its next backfill.
-pub(crate) const fn should_snap_bootstrap(
-    enabled: bool,
-    is_optimism: bool,
-    uses_hashed_state: bool,
-    finish: u64,
-    genesis: u64,
-    interrupted: bool,
-) -> bool {
-    enabled && !is_optimism && uses_hashed_state && (finish <= genesis || interrupted)
-}
-
 /// Adds an optional snap bootstrap before regular pipeline backfill.
 #[derive(Debug)]
 pub(crate) struct SnapBootstrapSync<N: ProviderNodeTypes, C> {
@@ -322,6 +310,18 @@ where
         }
         Poll::Pending
     }
+}
+
+/// Returns whether this database should use snap for its next backfill.
+pub(crate) const fn should_snap_bootstrap(
+    enabled: bool,
+    is_optimism: bool,
+    uses_hashed_state: bool,
+    finish: u64,
+    genesis: u64,
+    interrupted: bool,
+) -> bool {
+    enabled && !is_optimism && uses_hashed_state && (finish <= genesis || interrupted)
 }
 
 async fn run_snap_session<N, C>(
