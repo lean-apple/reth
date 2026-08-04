@@ -16,7 +16,7 @@ use crate::{
 };
 use alloy_eip7928::bal::RawBal;
 use alloy_eips::NumHash;
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{map::HashSet, Bytes, B256};
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
 use reth_network_p2p::{
@@ -46,7 +46,7 @@ pub struct SnapSyncSession<C, F, H> {
     /// it against the header commitment either way.
     bal_store: BalStoreHandle,
     /// Verified BALs awaiting a canonical durable handoff.
-    verified_bal_blocks: Vec<NumHash>,
+    verified_bal_blocks: HashSet<NumHash>,
     /// Where the session currently is.
     state: SyncState,
     /// Progress counters for this session.
@@ -74,7 +74,7 @@ where
             factory,
             chain,
             bal_store,
-            verified_bal_blocks: Vec::new(),
+            verified_bal_blocks: HashSet::default(),
             state: SyncState::Idle,
             metrics: SnapSyncMetrics::default(),
             request_id: AtomicU64::new(0),
@@ -311,7 +311,8 @@ where
             self.ensure_current_head(applied).await?;
         }
 
-        self.bal_store.flush(&self.verified_bal_blocks).map_err(|err| {
+        let verified_bal_blocks = self.verified_bal_blocks.iter().copied().collect::<Vec<_>>();
+        self.bal_store.flush(&verified_bal_blocks).map_err(|err| {
             SnapSyncError::Database(format!("flushing block access lists: {err}"))
         })?;
         self.verified_bal_blocks.clear();
@@ -390,9 +391,7 @@ where
         }
 
         let num_hash = NumHash::new(block.number, block.hash);
-        if !self.verified_bal_blocks.contains(&num_hash) {
-            self.verified_bal_blocks.push(num_hash);
-        }
+        self.verified_bal_blocks.insert(num_hash);
 
         // A list fetched from a peer is now as trustworthy as one a payload carried, so share it
         // through the same store instead of fetching it again on the next pass. Best-effort: the
@@ -713,7 +712,7 @@ mod tests {
             factory,
             chain: (),
             bal_store: BalStoreHandle::noop(),
-            verified_bal_blocks: Vec::new(),
+            verified_bal_blocks: HashSet::default(),
             state: SyncState::Verified { at },
             metrics: SnapSyncMetrics::default(),
             request_id: AtomicU64::new(0),
