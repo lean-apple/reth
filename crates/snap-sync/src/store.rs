@@ -18,6 +18,16 @@ use reth_storage_api::{
 use reth_trie::HashedPostState;
 use reth_trie_db::{state_root_with_committed_updates, STATE_ROOT_COMMIT_THRESHOLD};
 
+/// Persists verified snap state to the database.
+///
+/// Each write commits on its own: a batch is only durable once it has been checked against the
+/// pivot root, so a download interrupted mid-range leaves behind verified state rather than a
+/// partially written range.
+#[derive(Debug)]
+pub struct SnapStateWriter<'a, F> {
+    factory: &'a F,
+}
+
 /// Stage slot marking a snap sync generation whose state root has not been checked yet.
 ///
 /// A generation starts by wiping the hashed state, so a crash part-way leaves tables that look
@@ -37,16 +47,6 @@ pub struct SnapGeneration {
     pub target_hash: B256,
     /// State root the generation is assembling toward.
     pub state_root: B256,
-}
-
-/// Persists verified snap state to the database.
-///
-/// Each write commits on its own: a batch is only durable once it has been checked against the
-/// pivot root, so a download interrupted mid-range leaves behind verified state rather than a
-/// partially written range.
-#[derive(Debug)]
-pub struct SnapStateWriter<'a, F> {
-    factory: &'a F,
 }
 
 // Hand-written so the writer stays copyable regardless of whether `F` is: deriving would bound
