@@ -142,41 +142,6 @@ impl AccountData {
     }
 }
 
-/// Like the consensus trie account, but the code hash and storage root are empty byte strings
-/// rather than [`KECCAK256_EMPTY`]/[`EMPTY_ROOT_HASH`] when the account has no code/storage, to
-/// avoid transferring the same 32 bytes for every EOA.
-#[derive(RlpEncodable, RlpDecodable)]
-struct SlimAccountBody {
-    /// The account's nonce.
-    nonce: u64,
-    /// The account's balance.
-    balance: U256,
-    /// Empty when the account has no storage.
-    storage_root: Bytes,
-    /// Empty when the account has no code.
-    code_hash: Bytes,
-}
-
-impl SlimAccountBody {
-    /// Drops a field that holds its empty default, which is what makes the encoding slim.
-    fn shorten(value: B256, empty: B256) -> Bytes {
-        if value == empty {
-            Bytes::new()
-        } else {
-            Bytes::copy_from_slice(value.as_slice())
-        }
-    }
-
-    /// Restores a dropped field to `empty`, rejecting any length the encoding never produces.
-    fn restore(value: &Bytes, empty: B256) -> alloy_rlp::Result<B256> {
-        match value.len() {
-            0 => Ok(empty),
-            32 => Ok(B256::from_slice(value)),
-            _ => Err(alloy_rlp::Error::UnexpectedLength),
-        }
-    }
-}
-
 /// Response containing a number of consecutive accounts and the Merkle proofs for the entire range.
 // http://github.com/ethereum/devp2p/blob/master/caps/snap.md#accountrange-0x01
 #[derive(Debug, Clone, PartialEq, Eq, RlpEncodable, RlpDecodable)]
@@ -552,6 +517,39 @@ impl SnapProtocolMessage {
             return Err(SnapProtocolError::Rlp(alloy_rlp::Error::UnexpectedLength));
         }
         Ok(msg)
+    }
+}
+
+/// Like a trie account, with empty code and storage hashes omitted to reduce transfer size.
+#[derive(RlpEncodable, RlpDecodable)]
+struct SlimAccountBody {
+    /// The account's nonce.
+    nonce: u64,
+    /// The account's balance.
+    balance: U256,
+    /// Empty when the account has no storage.
+    storage_root: Bytes,
+    /// Empty when the account has no code.
+    code_hash: Bytes,
+}
+
+impl SlimAccountBody {
+    /// Drops a field that holds its empty default, which is what makes the encoding slim.
+    fn shorten(value: B256, empty: B256) -> Bytes {
+        if value == empty {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(value.as_slice())
+        }
+    }
+
+    /// Restores a dropped field to `empty`, rejecting any length the encoding never produces.
+    fn restore(value: &Bytes, empty: B256) -> alloy_rlp::Result<B256> {
+        match value.len() {
+            0 => Ok(empty),
+            32 => Ok(B256::from_slice(value)),
+            _ => Err(alloy_rlp::Error::UnexpectedLength),
+        }
     }
 }
 
