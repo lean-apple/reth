@@ -12,21 +12,21 @@ use crate::{error::SnapSyncError, store::SnapStateWriter};
 use alloy_eip7928::AccountChanges;
 use alloy_primitives::{
     keccak256,
-    map::{B256Map, B256Set},
-    Bytes, B256, U256,
+    map::{AddressMap, B256Map, B256Set},
+    Address, Bytes, B256, U256,
 };
 use alloy_rlp::Decodable;
 use reth_db_api::transaction::{DbTx, DbTxMut};
 use reth_provider::DatabaseProviderFactory;
-use reth_storage_api::{DBProvider, StateWriter};
+use reth_storage_api::{AccountExtReader, DBProvider, StateWriter};
 use reth_trie::{HashedPostState, HashedStorage};
 use reth_trie_common::bal::{self, BalAccountState};
 
 /// The state changes one block's access list commits to, in hashed-key form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BlockStateDiff {
-    /// Per-account field changes, keyed by `keccak256(address)`.
-    accounts: Vec<(B256, BalAccountState)>,
+    /// Per-account field changes with their address and hashed address.
+    accounts: Vec<(Address, B256, BalAccountState)>,
     /// Post-block slot values, keyed by hashed address then hashed slot.
     storage: B256Map<B256Map<U256>>,
     /// `(code hash, code)` pairs for contracts deployed in this block.
@@ -51,7 +51,7 @@ impl BlockStateDiff {
 
             // Accounts that were only read appear in the list with no changes at all.
             if !state.is_empty() {
-                diff.accounts.push((hashed_address, state));
+                diff.accounts.push((account.address, hashed_address, state));
             }
         }
 
@@ -70,23 +70,26 @@ impl BlockStateDiff {
     ) -> Result<(), SnapSyncError>
     where
         F: DatabaseProviderFactory,
-        F::Provider: DBProvider,
+        F::Provider: AccountExtReader + DBProvider,
         F::ProviderRW: DBProvider + StateWriter,
         <F::Provider as DBProvider>::Tx: DbTx,
         <F::ProviderRW as DBProvider>::Tx: DbTxMut,
     {
         let within = |address: &B256| limit.is_none_or(|limit| *address < limit);
+        let existing_accounts: AddressMap<_> = writer
+            .read_accounts(self.accounts.iter().filter_map(|(address, hashed_address, state)| {
+                (within(hashed_address) && state.needs_parent_account()).then_some(*address)
+            }))?
+            .into_iter()
+            .collect();
 
         let mut accounts = B256Map::default();
         let mut deleted = B256Set::default();
-        for (hashed_address, state) in self.accounts.iter().filter(|(address, _)| within(address)) {
-            // The stored account only matters for fields this block left untouched.
-            let existing = if state.needs_parent_account() {
-                writer.read_account(*hashed_address)?
-            } else {
-                None
-            };
-            let merged = state.merge_onto(existing.as_ref());
+        for (address, hashed_address, state) in
+            self.accounts.iter().filter(|(_, hashed_address, _)| within(hashed_address))
+        {
+            let existing = existing_accounts.get(address).and_then(Option::as_ref);
+            let merged = state.merge_onto(existing);
 
             // An account left with no balance, no nonce and no code does not exist under
             // EIP-161, so it has to be removed rather than written as an empty leaf. Storing one
@@ -144,6 +147,9 @@ mod tests {
         BalanceChange, BlockAccessIndex, CodeChange, NonceChange, SlotChanges, StorageChange,
     };
     use alloy_primitives::Address;
+    use reth_db_api::{models::StorageSettings, tables};
+    use reth_primitives_traits::Account;
+    use reth_provider::{test_utils::create_test_provider_factory, StorageSettingsCache};
 
     fn index(value: u64) -> BlockAccessIndex {
         BlockAccessIndex::new(value)
@@ -162,9 +168,10 @@ mod tests {
         let diff = BlockStateDiff::from_changes(&[changes]);
 
         assert_eq!(diff.accounts.len(), 1);
-        assert_eq!(diff.accounts[0].0, keccak256(address));
-        assert_eq!(diff.accounts[0].1.balance, Some(U256::from(30)));
-        assert_eq!(diff.accounts[0].1.nonce, Some(7));
+        assert_eq!(diff.accounts[0].0, address);
+        assert_eq!(diff.accounts[0].1, keccak256(address));
+        assert_eq!(diff.accounts[0].2.balance, Some(U256::from(30)));
+        assert_eq!(diff.accounts[0].2.nonce, Some(7));
     }
 
     #[test]
@@ -195,7 +202,7 @@ mod tests {
         let diff = BlockStateDiff::from_changes(&[changes]);
 
         assert_eq!(diff.bytecodes, vec![(keccak256(&code), code.clone())]);
-        assert_eq!(diff.accounts[0].1.code_hash, Some(Some(keccak256(&code))));
+        assert_eq!(diff.accounts[0].2.code_hash, Some(Some(keccak256(&code))));
     }
 
     #[test]
@@ -207,6 +214,40 @@ mod tests {
 
         assert!(diff.accounts.is_empty());
         assert!(diff.storage.is_empty());
+    }
+
+    #[test]
+    fn partial_changes_merge_with_the_stored_account() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let writer = SnapStateWriter::new(&factory);
+        let address = Address::repeat_byte(0xdd);
+        let hashed_address = keccak256(address);
+        let existing = Account {
+            nonce: 7,
+            balance: U256::from(10),
+            bytecode_hash: Some(B256::repeat_byte(0xee)),
+        };
+        writer
+            .commit_batch(
+                HashedPostState {
+                    accounts: B256Map::from_iter([(hashed_address, Some(existing))]),
+                    storages: B256Map::default(),
+                },
+                &[],
+            )
+            .unwrap();
+
+        let changes = AccountChanges::new(address)
+            .with_balance_change(BalanceChange::new(index(1), U256::from(20)));
+        BlockStateDiff::from_changes(&[changes]).apply(writer, None).unwrap();
+
+        let provider = factory.database_provider_ro().unwrap();
+        let merged =
+            provider.tx_ref().get::<tables::HashedAccounts>(hashed_address).unwrap().unwrap();
+        assert_eq!(merged.balance, U256::from(20));
+        assert_eq!(merged.nonce, existing.nonce);
+        assert_eq!(merged.bytecode_hash, existing.bytecode_hash);
     }
 
     #[test]

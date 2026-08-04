@@ -25,8 +25,8 @@ use reth_network_p2p::{
 };
 use reth_provider::{DatabaseProviderFactory, StaticFileProviderFactory};
 use reth_storage_api::{
-    BalStoreHandle, DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache,
-    TrieWriter,
+    AccountExtReader, BalStoreHandle, DBProvider, StageCheckpointWriter, StateWriter,
+    StorageSettingsCache, TrieWriter,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
@@ -61,7 +61,7 @@ impl<C, F, H> SnapSyncSession<C, F, H>
 where
     C: SnapClient + 'static,
     F: DatabaseProviderFactory,
-    F::Provider: DBProvider,
+    F::Provider: AccountExtReader + DBProvider,
     F::ProviderRW: DBProvider + StateWriter + TrieWriter + StorageSettingsCache,
     <F::Provider as DBProvider>::Tx: DbTx,
     <F::ProviderRW as DBProvider>::Tx: DbTx + DbTxMut,

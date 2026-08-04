@@ -1,7 +1,7 @@
 //! The writer boundary: generation lifecycle, write modes, and finalization.
 
 use crate::error::SnapSyncError;
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use reth_db_api::{
     tables,
     transaction::{DbTx, DbTxMut},
@@ -12,7 +12,8 @@ use reth_provider::{
 };
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_api::{
-    DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache, TrieWriter,
+    AccountExtReader, DBProvider, StageCheckpointWriter, StateWriter, StorageSettingsCache,
+    TrieWriter,
 };
 use reth_trie::{HashedPostState, StateRoot, StateRootProgress};
 use reth_trie_db::DatabaseStateRoot;
@@ -203,15 +204,25 @@ where
 impl<F> SnapStateWriter<'_, F>
 where
     F: DatabaseProviderFactory,
+    F::Provider: AccountExtReader + DBProvider,
+    <F::Provider as DBProvider>::Tx: DbTx,
+{
+    /// Reads accounts in one provider transaction for block access list merging.
+    pub fn read_accounts(
+        &self,
+        addresses: impl IntoIterator<Item = Address>,
+    ) -> Result<Vec<(Address, Option<Account>)>, SnapSyncError> {
+        let provider = self.factory.database_provider_ro().map_err(db_err)?;
+        provider.basic_accounts(addresses).map_err(db_err)
+    }
+}
+
+impl<F> SnapStateWriter<'_, F>
+where
+    F: DatabaseProviderFactory,
     F::Provider: DBProvider,
     <F::Provider as DBProvider>::Tx: DbTx,
 {
-    /// Reads a hashed account, used to merge partial block access list changes onto stored state.
-    pub fn read_account(&self, hashed_address: B256) -> Result<Option<Account>, SnapSyncError> {
-        let provider = self.factory.database_provider_ro().map_err(db_err)?;
-        provider.tx_ref().get::<tables::HashedAccounts>(hashed_address).map_err(db_err)
-    }
-
     /// Returns the generation that was interrupted before it was verified.
     ///
     /// `Some` means the hashed state on disk is a partial download and must not be read as though
