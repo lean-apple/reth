@@ -241,10 +241,7 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
     }
 
     fn try_spawn_head_update(&mut self) -> Result<bool, String> {
-        if !matches!(
-            self.state,
-            SnapBackfillState::Snap { waiting_for_target: true, header_update: None, .. }
-        ) {
+        if !matches!(self.state, SnapBackfillState::Snap { header_update: None, .. }) {
             return Ok(false)
         }
         let Some(target) = self.pending_target.take() else { return Ok(false) };
