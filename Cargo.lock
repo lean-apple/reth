@@ -10262,6 +10262,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-trie",
  "metrics",
+ "parking_lot",
  "reth-db-api",
  "reth-eth-wire-types",
  "reth-metrics",
