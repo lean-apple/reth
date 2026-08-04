@@ -10,12 +10,13 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::{BlockNumber, B256};
+use parking_lot::RwLock;
 use reth_provider::{DatabaseProviderFactory, HeaderProvider};
 use std::{
     future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc,
     },
 };
 
@@ -132,12 +133,14 @@ where
 
     /// Moves forkchoice to another persisted header.
     pub fn update_head(&self, hash: B256) -> Result<BlockRef, ChainError> {
-        if self.head.read().expect("head lock poisoned").hash == hash {
-            return Ok(*self.head.read().expect("head lock poisoned"))
+        let current = self.head.read();
+        if current.hash == hash {
+            return Ok(*current)
         }
+        drop(current);
 
         let head = Self::block_by_hash(&self.factory, hash)?;
-        *self.head.write().expect("head lock poisoned") = head;
+        *self.head.write() = head;
         self.token.fetch_add(1, Ordering::Release);
         Ok(head)
     }
@@ -166,7 +169,7 @@ where
     F::Provider: HeaderProvider,
 {
     fn head(&self) -> BlockRef {
-        *self.head.read().expect("head lock poisoned")
+        *self.head.read()
     }
 
     fn canonical_token(&self) -> u64 {

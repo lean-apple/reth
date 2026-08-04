@@ -35,6 +35,7 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 
 # misc
+parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
