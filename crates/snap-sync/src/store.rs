@@ -35,10 +35,9 @@ pub struct SnapStateWriter<'a, F> {
 /// the case.
 const SNAP_SYNC_STAGE: StageId = StageId::Other("SnapSync");
 
-/// What a snap sync generation was building toward, persisted while it is unverified.
+/// Persisted identity of an unverified snap generation.
 ///
-/// The hash and root make the marker self-describing: on restart the node can tell which block
-/// the partial state belongs to without trusting heights across a reorg.
+/// Restart detects this marker, then rebuilds from scratch instead of resuming partial state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
 pub struct SnapGeneration {
     /// Height of the target block, matching the stage checkpoint row.
