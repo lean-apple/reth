@@ -18,13 +18,18 @@ use tokio::sync::{oneshot, watch, Notify};
 #[derive(Debug)]
 pub(crate) struct SnapBootstrapSync<N: ProviderNodeTypes, C> {
     runtime: Runtime,
+    /// Header-only pipeline used to establish and advance the snap target.
     headers: Option<PipelineSync<N>>,
+    /// Standard pipeline backfill resumed after snap state is accepted.
     fallback: PipelineSync<N>,
     client: C,
     factory: ProviderFactory<N>,
     bal_store: BalStoreHandle,
+    /// Target associated with the currently running header pipeline.
     header_target: Option<PipelineTarget>,
+    /// Active snap state download and its head-update channel.
     snap: Option<SnapTask>,
+    /// Whether actions should be delegated to the standard pipeline.
     bootstrapped: bool,
 }
 
@@ -223,6 +228,7 @@ fn fatal(message: &'static str) -> PipelineError {
     PipelineError::Stage(StageError::Fatal(message.into()))
 }
 
+/// Handle for the active snap task and its rolling canonical head.
 #[derive(Debug)]
 struct SnapTask {
     result: oneshot::Receiver<Result<ControlFlow, PipelineError>>,
