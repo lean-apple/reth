@@ -160,7 +160,7 @@ where
     /// Every check that leads here is one a correct server passes, so the peer is downgraded and
     /// the request goes out again — the network layer then routes it elsewhere.
     fn penalize(&self, peer: PeerId, err: SnapSyncError) -> SnapSyncError {
-        debug!(target: "engine::snap", ?peer, %err, "Rejected snap response");
+        debug!(target: "snap", ?peer, %err, "Rejected snap response");
         self.client.report_bad_message(peer);
         err
     }
