@@ -392,7 +392,7 @@ mod tests {
 
         fn database_provider_rw(&self) -> Result<Self::ProviderRW, ProviderError> {
             self.remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .map_err(|_| {
