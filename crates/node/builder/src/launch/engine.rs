@@ -156,9 +156,8 @@ impl EngineNodeLauncher {
 
         let node_config = ctx.node_config();
 
-        let interrupted_snap = SnapStateWriter::new(ctx.provider_factory())
-            .interrupted_generation()
-            .map_err(|err| eyre::eyre!(err))?;
+        let interrupted_snap =
+            SnapStateWriter::new(ctx.provider_factory()).interrupted_generation()?;
         if interrupted_snap.is_some() && !node_config.network.snap {
             return Err(eyre::eyre!(
                 "an interrupted snap sync generation exists; restart with --snap"
