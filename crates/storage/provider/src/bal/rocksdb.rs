@@ -2,7 +2,7 @@ use crate::providers::RocksDBProvider;
 use alloy_eip7928::BAL_RETENTION_PERIOD_SLOTS;
 use alloy_eips::NumHash;
 use alloy_primitives::{BlockHash, BlockNumber, Bytes};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use reth_db_api::{
     models::{StoredBlockAccessList, StoredBlockAccessListKey},
     table::{Decode, Decompress},
@@ -26,6 +26,7 @@ pub struct RocksDBBalStore {
     buffer_retention: PruneMode,
     rocksdb: RocksDBProvider,
     buffer: Arc<RwLock<RocksDBBalStoreBuffer>>,
+    persistence_lock: Arc<Mutex<()>>,
     notifications: EventSender<BalNotification>,
 }
 
@@ -44,6 +45,7 @@ impl RocksDBBalStore {
             ),
             rocksdb,
             buffer: Arc::new(RwLock::new(RocksDBBalStoreBuffer::default())),
+            persistence_lock: Arc::new(Mutex::new(())),
             notifications: EventSender::new(super::DEFAULT_BAL_NOTIFICATION_CHANNEL_SIZE),
         }
     }
@@ -235,8 +237,8 @@ impl BalStore for RocksDBBalStore {
     }
 
     fn flush(&self, blocks: &[NumHash]) -> ProviderResult<()> {
-        let mut buffer = self.buffer.write();
-        let pending = buffer.pending_entries(blocks);
+        let _persistence_guard = self.persistence_lock.lock();
+        let pending = self.buffer.read().pending_entries(blocks);
         if !pending.is_empty() {
             let mut batch = self.rocksdb.batch();
             for (key, bal) in &pending {
@@ -246,9 +248,10 @@ impl BalStore for RocksDBBalStore {
                 )?;
             }
             batch.commit()?;
-            buffer.remove_flushed(&pending);
+            self.buffer.write().remove_flushed(&pending);
         }
 
+        let mut buffer = self.buffer.write();
         if let Some(tip) = buffer.highest_block_number {
             buffer.prune_cache(self.buffer_retention, tip);
         }
@@ -256,6 +259,7 @@ impl BalStore for RocksDBBalStore {
     }
 
     fn prune(&self, tip: BlockNumber) -> ProviderResult<usize> {
+        let _persistence_guard = self.persistence_lock.lock();
         let keys = self.keys_to_prune(tip)?;
         if !keys.is_empty() {
             let mut batch = self.rocksdb.batch();
