@@ -414,6 +414,9 @@ Networking:
 
           When enabled, peers discovered without a confirmed fork ID are not added to the peer set until their fork ID is verified via EIP-868 ENR request. This filters out peers from other networks that pollute the discovery table.
 
+      --snap
+          Enable experimental `snap/2` serving and state bootstrap (EIP-8189). Fresh Ethereum v2 databases bootstrap with snap; other databases keep pipeline sync
+
 Logging:
       --log.stdout.format <FORMAT>
           The format to use for logs written to stdout

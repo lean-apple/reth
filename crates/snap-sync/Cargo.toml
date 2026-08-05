@@ -1,0 +1,60 @@
+[package]
+name = "reth-snap-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "snap/2 (EIP-8189) state synchronization"
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-db-api.workspace = true
+reth-eth-wire-types.workspace = true
+reth-network-p2p.workspace = true
+metrics.workspace = true
+reth-metrics.workspace = true
+reth-network-peers.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-stages-types.workspace = true
+reth-storage-api.workspace = true
+reth-trie.workspace = true
+reth-trie-common = { workspace = true, features = ["eip7928"] }
+reth-trie-db.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-eip7928 = { workspace = true, features = ["rlp"] }
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+# misc
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy-trie.workspace = true
+reth-db-api = { workspace = true, features = ["test-utils"] }
+reth-provider = { workspace = true, features = ["test-utils"] }
+reth-trie = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[features]
+default = []
+test-utils = [
+    "reth-db-api/test-utils",
+    "reth-network-p2p/test-utils",
+    "reth-primitives-traits/test-utils",
+    "reth-provider/test-utils",
+    "reth-trie/test-utils",
+    "reth-trie-db/test-utils",
+    "reth-stages-types/test-utils",
+    "reth-trie-common/test-utils",
+]

@@ -91,6 +91,8 @@ pub struct DefaultNetworkArgs {
     pub propagation_mode: TransactionPropagationMode,
     /// Default enforce ENR fork ID setting.
     pub enforce_enr_fork_id: bool,
+    /// Whether `snap/2` is advertised by default.
+    pub snap: bool,
 }
 
 impl DefaultNetworkArgs {
@@ -229,6 +231,7 @@ impl Default for DefaultNetworkArgs {
             tx_ingress_policy: TransactionIngressPolicy::default(),
             propagation_mode: TransactionPropagationMode::Sqrt,
             enforce_enr_fork_id: false,
+            snap: false,
         }
     }
 }
@@ -440,6 +443,11 @@ pub struct NetworkArgs {
     /// networks that pollute the discovery table.
     #[arg(long, default_value_t = DefaultNetworkArgs::get_global().enforce_enr_fork_id)]
     pub enforce_enr_fork_id: bool,
+
+    /// Enable experimental `snap/2` serving and state bootstrap (EIP-8189).
+    /// Fresh Ethereum v2 databases bootstrap with snap; other databases keep pipeline sync.
+    #[arg(long = "snap", default_value_t = DefaultNetworkArgs::get_global().snap)]
+    pub snap: bool,
 }
 
 impl NetworkArgs {
@@ -596,6 +604,7 @@ impl NetworkArgs {
                 config.sessions.clone().with_upscaled_event_buffer(peers_config.max_peers()),
             )
             .peer_config(peers_config)
+            .with_snap(self.snap)
             .boot_nodes(chain_bootnodes.clone())
             .transactions_manager_config(self.transactions_manager_config())
             // Configure node identity
@@ -723,6 +732,7 @@ impl Default for NetworkArgs {
             tx_ingress_policy,
             propagation_mode,
             enforce_enr_fork_id,
+            snap,
         } = DefaultNetworkArgs::get_global().clone();
         Self {
             discovery: DiscoveryArgs::default(),
@@ -754,6 +764,7 @@ impl Default for NetworkArgs {
             tx_ingress_policy,
             disable_tx_gossip: false,
             propagation_mode,
+            snap,
             required_block_hashes: vec![],
             network_id: None,
             eth_max_message_size: None,

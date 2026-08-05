@@ -1,0 +1,292 @@
+//! Streaming download of accounts, storage and bytecodes at a fixed state root.
+//!
+//! [`StateDownloader`] walks the account trie in hashed order. Each account batch is verified
+//! against the pivot root, written, and immediately followed by that batch's storage and
+//! bytecodes before the next range is requested, so peak memory stays at one batch regardless of
+//! how large the state is.
+
+mod accounts;
+mod bytecodes;
+mod storage;
+
+use crate::{error::SnapSyncError, store::SnapStateWriter};
+use accounts::AccountRange;
+use alloy_primitives::{
+    map::{B256Map, B256Set},
+    B256, KECCAK256_EMPTY, U256,
+};
+use reth_db_api::transaction::DbTxMut;
+use reth_network_p2p::snap::client::SnapClient;
+use reth_network_peers::PeerId;
+use reth_primitives_traits::Account;
+use reth_provider::DatabaseProviderFactory;
+use reth_storage_api::{DBProvider, StateWriter};
+use reth_trie::{HashedPostState, TrieAccount};
+use storage::StorageRoots;
+use tracing::debug;
+
+/// Maximum number of account hashes per storage range request.
+const STORAGE_BATCH_SIZE: usize = 20;
+
+/// Maximum number of code hashes per bytecode request.
+const BYTECODE_BATCH_SIZE: usize = 50;
+
+/// Upper bound of the hashed key space.
+const MAX_HASH: B256 = B256::new([0xff; 32]);
+
+/// Downloads the hashed state at one state root from snap peers.
+#[derive(Debug)]
+pub struct StateDownloader<'a, C, F> {
+    /// Peer client used for every snap request.
+    client: &'a C,
+    /// Sink for verified state.
+    writer: SnapStateWriter<'a, F>,
+    /// The state root every response is verified against.
+    root_hash: B256,
+    /// Monotonic counter correlating requests with responses.
+    request_id: u64,
+}
+
+impl<'a, C, F> StateDownloader<'a, C, F>
+where
+    C: SnapClient + 'static,
+    F: DatabaseProviderFactory,
+    F::ProviderRW: DBProvider + StateWriter,
+    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+{
+    /// Creates a downloader for the state at `root_hash`.
+    pub const fn new(client: &'a C, factory: &'a F, root_hash: B256) -> Self {
+        Self { client, writer: SnapStateWriter::new(factory), root_hash, request_id: 0 }
+    }
+
+    /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
+    ///
+    /// A served account range is committed in micro-batches: nothing becomes durable until that
+    /// batch's accounts, their complete storage and every bytecode they reference are in hand and
+    /// written together. Writing accounts ahead of their storage would let a stale root strand
+    /// accounts above the resume point, where the rolling target transition no longer reaches
+    /// them and a later range at a fresher root would not mention the ones that had been deleted.
+    pub async fn run(
+        &mut self,
+        starting_hash: B256,
+    ) -> Result<DownloadStateOutcome, SnapSyncError> {
+        let mut cursor = starting_hash;
+
+        loop {
+            let (decoded, exhausted) = match self.fetch_account_range(cursor).await {
+                Ok(AccountRange::Unavailable) => {
+                    return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
+                }
+                Ok(AccountRange::PastTheEnd) => return Ok(DownloadStateOutcome::Done),
+                Ok(AccountRange::Verified { accounts, exhausted }) => (accounts, exhausted),
+                Err(SnapSyncError::NoSnapPeers) => {
+                    return Ok(DownloadStateOutcome::WaitingForPeers { resume_from: cursor })
+                }
+                Err(err) => return Err(err),
+            };
+
+            debug!(
+                target: "snap",
+                accounts = decoded.len(),
+                root_hash = %self.root_hash,
+                "Verified account range"
+            );
+
+            for micro_batch in decoded.chunks(STORAGE_BATCH_SIZE) {
+                // Resuming here re-downloads only this micro-batch, and everything below it is
+                // already durable and complete.
+                let resume_from = micro_batch[0].0;
+
+                match self.commit_micro_batch(micro_batch).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(DownloadStateOutcome::Stale { resume_from }),
+                    Err(SnapSyncError::NoSnapPeers) => {
+                        return Ok(DownloadStateOutcome::WaitingForPeers { resume_from })
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            // An exhausted range was already checked against the root, so there is nothing after
+            // it.
+            if exhausted {
+                return Ok(DownloadStateOutcome::Done)
+            }
+            let last_hash = decoded.last().map(|(hash, _)| *hash).expect("range was not empty");
+            let Some(next) = next_hash(last_hash) else { return Ok(DownloadStateOutcome::Done) };
+            cursor = next;
+        }
+    }
+
+    /// Assembles one micro-batch and commits it as a unit.
+    ///
+    /// Returns `false` when the root went stale part-way, in which case nothing was written.
+    async fn commit_micro_batch(
+        &mut self,
+        batch: &[(B256, TrieAccount)],
+    ) -> Result<bool, SnapSyncError> {
+        let account_hashes: Vec<B256> = batch.iter().map(|(hash, _)| *hash).collect();
+        let storage_roots = StorageRoots(
+            batch.iter().map(|(hash, account)| (*hash, account.storage_root)).collect(),
+        );
+
+        let Some(storages) = self.collect_storage(&account_hashes, &storage_roots).await? else {
+            return Ok(false)
+        };
+
+        let code_hashes: B256Set = batch
+            .iter()
+            .map(|(_, account)| account.code_hash)
+            .filter(|hash| *hash != KECCAK256_EMPTY)
+            .collect();
+        let bytecodes = self.collect_bytecodes(&code_hashes).await?;
+
+        let accounts = batch
+            .iter()
+            .map(|(hash, account)| (*hash, Some(Account::from(*account))))
+            .collect::<B256Map<_>>();
+
+        self.writer.commit_batch(HashedPostState { accounts, storages }, &bytecodes)?;
+        Ok(true)
+    }
+
+    const fn next_request_id(&mut self) -> u64 {
+        self.request_id += 1;
+        self.request_id
+    }
+
+    /// Reports a peer whose response could not be used, and returns the error to retry against.
+    ///
+    /// Every check that leads here is one a correct server passes, so the peer is downgraded and
+    /// the request goes out again — the network layer then routes it elsewhere.
+    fn penalize(&self, peer: PeerId, err: SnapSyncError) -> SnapSyncError {
+        debug!(target: "snap", ?peer, %err, "Rejected snap response");
+        self.client.report_bad_message(peer);
+        err
+    }
+}
+
+/// Result of a [`StateDownloader::run`] call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DownloadStateOutcome {
+    /// The whole account range was iterated and written; the state at the root is complete.
+    Done,
+    /// No peer could serve the requested root any more.
+    ///
+    /// Carries the account hash to resume from once the caller has a fresher root. State written
+    /// before this point stays valid, because every batch was verified against the root it was
+    /// served at.
+    Stale {
+        /// Account hash to resume the download from.
+        resume_from: B256,
+    },
+    /// No connected peer advertises `snap/2`.
+    ///
+    /// Unlike [`Self::Stale`] the target is still fine; only the peer set is. Carries the same
+    /// resume point so waiting costs nothing already downloaded.
+    WaitingForPeers {
+        /// Account hash to resume the download from.
+        resume_from: B256,
+    },
+}
+
+/// Returns the next hash after `hash`, or `None` at the end of the key space.
+fn next_hash(hash: B256) -> Option<B256> {
+    U256::from_be_bytes(hash.0).checked_add(U256::from(1)).map(B256::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_eth_wire_types::snap::{
+        GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage,
+    };
+    use reth_network_p2p::{
+        download::DownloadClient, error::PeerRequestResult, priority::Priority,
+        snap::client::SnapResponse,
+    };
+    use reth_provider::test_utils::create_test_provider_factory;
+    use std::future::{ready, Ready};
+
+    fn b256(value: u64) -> B256 {
+        B256::left_padding_from(&value.to_be_bytes())
+    }
+
+    /// A client standing in for a network with no `snap/2` peer connected, which fails every snap
+    /// request outright rather than queueing it.
+    #[derive(Debug)]
+    struct NoSnapPeers;
+
+    impl DownloadClient for NoSnapPeers {
+        fn report_bad_message(&self, _peer_id: reth_network_peers::PeerId) {
+            panic!("a request that never reached a peer must not blame one")
+        }
+
+        fn num_connected_peers(&self) -> usize {
+            0
+        }
+    }
+
+    impl SnapClient for NoSnapPeers {
+        type Output = Ready<PeerRequestResult<SnapResponse>>;
+
+        fn get_account_range_with_priority(
+            &self,
+            _request: GetAccountRangeMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+            self.get_storage_ranges_with_priority(request, Priority::Normal)
+        }
+
+        fn get_storage_ranges_with_priority(
+            &self,
+            _request: GetStorageRangesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+            self.get_byte_codes_with_priority(request, Priority::Normal)
+        }
+
+        fn get_byte_codes_with_priority(
+            &self,
+            _request: GetByteCodesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_block_access_lists_with_priority(
+            &self,
+            _request: reth_eth_wire_types::snap::GetBlockAccessListsMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+    }
+
+    #[test]
+    fn next_hash_steps_and_stops_at_the_end() {
+        assert_eq!(next_hash(B256::ZERO), Some(b256(1)));
+        assert_eq!(next_hash(MAX_HASH), None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_peer_set_pauses_the_download_rather_than_ending_it() {
+        let client = NoSnapPeers;
+        let factory = create_test_provider_factory();
+        let mut downloader = StateDownloader::new(&client, &factory, b256(0xabc));
+
+        // A session that starts before any snap peer connects would otherwise exhaust its retry
+        // budget instantly and report a failed sync.
+        let outcome = downloader.run(b256(7)).await.unwrap();
+
+        assert_eq!(outcome, DownloadStateOutcome::WaitingForPeers { resume_from: b256(7) });
+    }
+}

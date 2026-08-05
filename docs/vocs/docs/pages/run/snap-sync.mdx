@@ -1,0 +1,42 @@
+---
+description: Serve and experiment with snap/2 (EIP-8189) state sync.
+---
+
+# Snap Sync (snap/2)
+
+[EIP-8189](https://eips.ethereum.org/EIPS/eip-8189) replaces snap/1's
+trie-node healing with [EIP-7928](https://eips.ethereum.org/EIPS/eip-7928)
+block access lists: a syncing node bulk-downloads flat state at a recent
+pivot block, then catches up to the head by replaying each block's access
+list instead of fetching trie nodes. The EIP is a draft, and Reth's support
+for it is experimental.
+
+## Serving snap/2
+
+Reth can answer snap/2 requests — account ranges and storage ranges with
+proofs, bytecodes, and block access lists — for the most recent 128 blocks.
+Serving is off by default and is enabled with:
+
+```bash
+reth node --snap
+```
+
+Advertising the capability commits the node to answering those requests, so
+leave it off unless you want to serve state to syncing peers. Canonical block
+access lists are retained on disk for the EIP-7928 retention window.
+
+## Syncing with snap/2
+
+On a fresh Ethereum v2 database, `--snap` downloads validated headers with
+Reth's header stage, then bootstraps state through `reth-snap-sync`. Existing
+synced databases, legacy v1 databases, and OP Stack nodes retain pipeline
+sync. The feature remains off by default.
+
+Snap sync assembles hashed state, so it requires the v2 storage layout
+(hashed tables as the canonical state representation, the default; see
+[Storage V2](/run/storage)). Legacy v1 databases are rejected before any
+data is touched.
+
+While a downloaded generation is incomplete, the database carries a
+`SnapSync` stage marker. Restart with `--snap` to rebuild it safely; launching
+without the flag is rejected until the generation is completed.
