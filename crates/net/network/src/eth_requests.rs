@@ -821,7 +821,9 @@ mod tests {
     use reth_primitives_traits::Account;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_storage_api::noop::NoopProvider;
-    use reth_transaction_pool::blobstore::{BlobStoreCleanupStat, BlobStoreError};
+    use reth_transaction_pool::blobstore::{
+        BlobStoreCleanupStat, BlobStoreError, PooledBlobSidecar,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -835,18 +837,11 @@ mod tests {
     }
 
     impl BlobStore for CountingBlobStore {
-        fn insert(
-            &self,
-            _tx: B256,
-            _data: BlobTransactionSidecarVariant,
-        ) -> Result<(), BlobStoreError> {
+        fn insert(&self, _tx: B256, _data: PooledBlobSidecar) -> Result<(), BlobStoreError> {
             Ok(())
         }
 
-        fn insert_all(
-            &self,
-            _txs: Vec<(B256, BlobTransactionSidecarVariant)>,
-        ) -> Result<(), BlobStoreError> {
+        fn insert_all(&self, _txs: Vec<(B256, PooledBlobSidecar)>) -> Result<(), BlobStoreError> {
             Ok(())
         }
 

@@ -81,7 +81,9 @@ where
 
                 // A complete zero-origin trie replaces whatever was stored for this account:
                 // merging would keep slots that the trie being downloaded does not contain.
-                storages.insert(account_hash, HashedStorage::from_iter(true, account_slots));
+                let mut storage = HashedStorage::new(true);
+                storage.storage.extend(account_slots);
+                storages.insert(account_hash, storage);
             }
 
             collected.extend(storages);

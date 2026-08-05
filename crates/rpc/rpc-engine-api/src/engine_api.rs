@@ -788,6 +788,10 @@ where
         self.inner.task_spawner.spawn_blocking_task(async move {
             let mut result = Vec::with_capacity(hashes.len());
             for hash in hashes {
+                if tx.is_closed() {
+                    return;
+                }
+
                 let block_result = inner.provider.block(BlockHashOrNumber::Hash(hash));
                 match block_result {
                     Ok(block) => {
@@ -818,6 +822,10 @@ where
         let inner = self.inner.clone();
 
         self.inner.task_spawner.spawn_blocking_task(async move {
+            if tx.is_closed() {
+                return;
+            }
+
             tx.send(
                 get_bals_by_hashes(&inner.provider, &hashes)
                     .map_err(|err| EngineApiError::Internal(Box::new(err))),

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use crate::{EthApiTypes, RpcNodeCoreExt, RpcReceipt};
 use alloy_consensus::{transaction::TransactionMeta, TxReceipt};
 use futures::Future;
-use reth_primitives_traits::Recovered;
+use reth_primitives_traits::{Recovered, RecoveredBlock};
 use reth_rpc_convert::{transaction::ConvertReceiptInput, RpcConvert};
 use reth_rpc_eth_types::{
     error::FromEthApiError, utils::calculate_gas_used_and_next_log_index, EthApiError,
 };
-use reth_storage_api::{ProviderReceipt, ProviderTx};
+use reth_storage_api::{ProviderBlock, ProviderReceipt, ProviderTx};
 
 /// Assembles transaction receipt data w.r.t to network.
 ///
@@ -28,6 +28,7 @@ pub trait LoadReceipt:
         meta: TransactionMeta,
         receipt: ProviderReceipt<Self::Provider>,
         all_receipts: Option<Arc<Vec<ProviderReceipt<Self::Provider>>>>,
+        block: Option<Arc<RecoveredBlock<ProviderBlock<Self::Provider>>>>,
     ) -> impl Future<Output = Result<RpcReceipt<Self::NetworkTypes>, Self::Error>> + Send {
         async move {
             let hash = meta.block_hash;
@@ -45,17 +46,21 @@ pub trait LoadReceipt:
             let (gas_used, next_log_index) =
                 calculate_gas_used_and_next_log_index(meta.index, &all_receipts);
 
-            Ok(self
-                .converter()
-                .convert_receipts(vec![ConvertReceiptInput {
-                    tx: tx.as_recovered_ref(),
-                    gas_used: receipt.cumulative_gas_used() - gas_used,
-                    receipt,
-                    next_log_index,
-                    meta,
-                }])?
-                .pop()
-                .unwrap())
+            let inputs = vec![ConvertReceiptInput {
+                tx: tx.as_recovered_ref(),
+                gas_used: receipt.cumulative_gas_used() - gas_used,
+                receipt,
+                next_log_index,
+                meta,
+            }];
+            let mut receipts = match block {
+                Some(block) => {
+                    self.converter().convert_receipts_with_block(inputs, block.sealed_block())
+                }
+                None => self.converter().convert_receipts(inputs),
+            }?;
+
+            Ok(receipts.pop().unwrap())
         }
     }
 }

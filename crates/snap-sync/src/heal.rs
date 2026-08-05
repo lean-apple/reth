@@ -109,8 +109,9 @@ impl BlockStateDiff {
             .map(|(address, slots)| {
                 // A block access list states the slots it changed, not the ones it left alone, so
                 // these merge onto what is stored.
-                let wiped = deleted.contains(address);
-                (*address, HashedStorage::from_iter(wiped, slots.iter().map(|(k, v)| (*k, *v))))
+                let mut storage = HashedStorage::new(deleted.contains(address));
+                storage.storage.extend(slots.iter().map(|(key, value)| (*key, *value)));
+                (*address, storage)
             })
             .collect();
 

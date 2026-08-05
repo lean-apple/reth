@@ -354,7 +354,7 @@ mod tests {
             accounts: accounts.iter().map(|(hash, account)| (*hash, Some(*account))).collect(),
             storages: B256Map::from_iter([(
                 storage_owner(),
-                HashedStorage::from_iter(false, slots),
+                HashedStorage::from_iter(slots),
             )]),
         };
 
