@@ -320,9 +320,9 @@ fn parse_description(s: &str) -> (&str, &str) {
 /// Returns the summary for a command and its subcommands.
 fn cmd_summary(cmd: &Cmd, indent: usize) -> String {
     let cmd_s = cmd.to_string();
-    let cmd_path = cmd_s.replace(" ", "/");
+    let cmd_path = cmd_s.replace(' ', "/");
     let indent_string = " ".repeat(indent + (cmd.subcommands.len() * 2));
-    format!("{}- [`{}`](./{}.mdx)\n", indent_string, cmd_s, cmd_path)
+    format!("{indent_string}- [`{cmd_s}`](/cli/{cmd_path})\n")
 }
 
 /// Overwrites the root SUMMARY.mdx file with the generated content.
@@ -589,5 +589,17 @@ impl<'a> fmt::Display for Cmd<'a> {
             write!(f, " {}", self.subcommands.join(" "))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_summary_uses_absolute_cli_route() {
+        let cmd = Cmd { cmd: Path::new("reth"), subcommands: vec!["re-execute".to_string()] };
+
+        assert_eq!(cmd_summary(&cmd, 2), "    - [`reth re-execute`](/cli/reth/re-execute)\n");
     }
 }
