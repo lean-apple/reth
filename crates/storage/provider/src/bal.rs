@@ -183,15 +183,6 @@ impl BalStore for InMemoryBalStore {
         Ok(result)
     }
 
-    fn get_by_block_num_hash(&self, block: NumHash) -> ProviderResult<Option<Bytes>> {
-        let inner = self.inner.read();
-        Ok(inner
-            .entries
-            .get(&block.hash)
-            .filter(|entry| entry.block_number == block.number)
-            .map(|entry| entry.bal.clone()))
-    }
-
     fn append_by_hashes_with_limit(
         &self,
         block_hashes: &[BlockHash],

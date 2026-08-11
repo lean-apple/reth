@@ -16,7 +16,7 @@ use alloy_primitives::{
     Address, Bytes, B256, U256,
 };
 use alloy_rlp::Decodable;
-use reth_db_api::transaction::{DbTx, DbTxMut};
+use reth_db_api::transaction::DbTxMut;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{AccountExtReader, DBProvider, StateWriter};
 use reth_trie::{HashedPostState, HashedStorage};
@@ -71,9 +71,7 @@ impl BlockStateDiff {
     where
         F: DatabaseProviderFactory,
         F::Provider: AccountExtReader + DBProvider,
-        F::ProviderRW: DBProvider + StateWriter,
-        <F::Provider as DBProvider>::Tx: DbTx,
-        <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+        F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
     {
         let within = |address: &B256| limit.is_none_or(|limit| *address < limit);
         let existing_accounts: AddressMap<_> = writer
@@ -148,7 +146,7 @@ mod tests {
         BalanceChange, BlockAccessIndex, CodeChange, NonceChange, SlotChanges, StorageChange,
     };
     use alloy_primitives::Address;
-    use reth_db_api::{models::StorageSettings, tables};
+    use reth_db_api::{models::StorageSettings, tables, transaction::DbTx};
     use reth_primitives_traits::Account;
     use reth_provider::{test_utils::create_test_provider_factory, StorageSettingsCache};
 

@@ -51,8 +51,7 @@ impl<'a, C, F> StateDownloader<'a, C, F>
 where
     C: SnapClient + 'static,
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+    F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
 {
     /// Creates a downloader for the state at `root_hash`.
     pub const fn new(client: &'a C, factory: &'a F, root_hash: B256) -> Self {

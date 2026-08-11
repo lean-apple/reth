@@ -51,7 +51,6 @@ pub use revm::database::states::OriginalValuesKnown;
 // reexport traits to avoid breaking changes
 pub use reth_static_file_types as static_file;
 pub use reth_storage_api::{
-    get_bal_by_hash, get_bals_by_hashes, get_bals_by_hashes_with_limit, get_revm_bal_by_hash,
     BalNotification, BalNotificationStream, BalProvider, BalStore, BalStoreHandle,
     GetBlockAccessListLimit, HistoryWriter, MetadataProvider, MetadataWriter, NoopBalStore, RawBal,
     StateWriteConfig, StatsReader, StorageSettings, StorageSettingsCache,

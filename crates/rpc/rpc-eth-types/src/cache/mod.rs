@@ -5,7 +5,7 @@ use crate::block::CachedTransaction;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_eip7928::bal::DecodedBal;
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::{Address, TxHash, B256};
+use alloy_primitives::{Address, Bytes, TxHash, B256};
 use futures::{stream::FuturesOrdered, Stream, StreamExt};
 use reth_chain_state::CanonStateNotification;
 use reth_errors::{ProviderError, ProviderResult};
@@ -19,7 +19,7 @@ use reth_revm::{
         BalWrites as RevmBalWrites, StorageBal as RevmStorageBal,
     },
 };
-use reth_storage_api::{get_revm_bal_by_hash, BalProvider, BlockReader, TransactionVariant};
+use reth_storage_api::{BalProvider, BlockReader, TransactionVariant};
 use reth_tasks::Runtime;
 use schnellru::{ByLength, Limiter, LruMap};
 use std::{
@@ -155,6 +155,16 @@ impl<N: NodePrimitives> EthStateCache<N> {
         let (response_tx, rx) = oneshot::channel();
         let _ = self.to_service.send(CacheAction::GetBlockWithSenders { block_hash, response_tx });
         rx.await.map_err(|_| CacheServiceUnavailable)?
+    }
+
+    /// Requests the block for the given block hash if it is cached.
+    pub async fn get_maybe_block(
+        &self,
+        block_hash: B256,
+    ) -> ProviderResult<Option<Arc<RecoveredBlock<N::Block>>>> {
+        let (response_tx, rx) = oneshot::channel();
+        let _ = self.to_service.send(CacheAction::GetCachedBlock { block_hash, response_tx });
+        rx.await.map_err(|_| CacheServiceUnavailable.into())
     }
 
     /// Requests the receipts for the block hash
@@ -615,8 +625,11 @@ where
                                     ActionSender::new(CacheKind::Bal, block_hash, action_tx);
                                 this.action_task_spawner.spawn_blocking_task(async move {
                                     let _permit = rate_limiter.acquire().await;
-                                    let res = get_revm_bal_by_hash(&provider, block_hash)
-                                        .map(|maybe_bal| maybe_bal.map(CachedRevmBal::new));
+                                    let res = provider.get_bal_by_hash(block_hash).and_then(
+                                        |maybe_bal| {
+                                            maybe_bal.map(CachedRevmBal::try_from_raw).transpose()
+                                        },
+                                    );
                                     action_sender.send_bal(res);
                                 });
                             }
@@ -931,6 +944,18 @@ impl CachedRevmBal {
     #[inline]
     fn new(bal: DecodedBal<Arc<RevmBal>>) -> Self {
         Self(Arc::new(bal))
+    }
+
+    /// Decodes raw BAL bytes into the representation used by revm.
+    fn try_from_raw(raw: Bytes) -> ProviderResult<Self> {
+        DecodedBal::from_rlp_bytes(raw)
+            .map_err(Into::into)
+            .and_then(|decoded| {
+                decoded.try_map(|bal| {
+                    RevmBal::try_from(Vec::from(bal)).map(Arc::new).map_err(ProviderError::other)
+                })
+            })
+            .map(Self::new)
     }
 }
 

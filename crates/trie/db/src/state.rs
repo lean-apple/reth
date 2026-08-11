@@ -6,7 +6,7 @@ use reth_db_api::{
 };
 use reth_execution_errors::StateRootError;
 use reth_storage_api::{
-    BlockNumReader, ChangeSetReader, DBProvider, DatabaseProviderFactory, StorageChangeSetReader,
+    ChangeSetReader, DBProvider, DatabaseProviderFactory, StorageChangeSetReader,
     StorageSettingsCache, TrieWriter,
 };
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
@@ -147,7 +147,7 @@ pub trait DatabaseHashedPostState: Sized {
     /// Initializes [`HashedPostStateSorted`] from reverts. Iterates over state reverts in the
     /// specified range and aggregates them into sorted hashed state.
     fn from_reverts(
-        provider: &(impl ChangeSetReader + StorageChangeSetReader + BlockNumReader + DBProvider),
+        provider: &(impl ChangeSetReader + StorageChangeSetReader),
         range: impl RangeBounds<BlockNumber>,
     ) -> Result<HashedPostStateSorted, ProviderError>;
 }
@@ -264,18 +264,6 @@ impl<'a, TX: DbTx, A: crate::TrieTableAdapter> DatabaseStateRoot<'a, TX>
     }
 }
 
-/// Calls [`HashedPostStateSorted::from_reverts`].
-pub fn from_reverts_auto(
-    provider: &(impl ChangeSetReader
-          + StorageChangeSetReader
-          + BlockNumReader
-          + DBProvider
-          + StorageSettingsCache),
-    range: impl RangeBounds<BlockNumber>,
-) -> Result<HashedPostStateSorted, ProviderError> {
-    HashedPostStateSorted::from_reverts(provider, range)
-}
-
 impl DatabaseHashedPostState for HashedPostStateSorted {
     /// Builds a sorted hashed post-state from reverts.
     ///
@@ -288,7 +276,7 @@ impl DatabaseHashedPostState for HashedPostStateSorted {
     /// - Returns keys already ordered for trie iteration.
     #[instrument(target = "trie::db", skip(provider), fields(range))]
     fn from_reverts(
-        provider: &(impl ChangeSetReader + StorageChangeSetReader + BlockNumReader + DBProvider),
+        provider: &(impl ChangeSetReader + StorageChangeSetReader),
         range: impl RangeBounds<BlockNumber>,
     ) -> Result<Self, ProviderError> {
         // Extract concrete start/end values to use for both account and storage changesets.

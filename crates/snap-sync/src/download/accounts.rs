@@ -20,8 +20,7 @@ impl<C, F> StateDownloader<'_, C, F>
 where
     C: SnapClient + 'static,
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+    F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
 {
     /// Requests one account range, retrying with another peer when a response cannot be trusted.
     ///

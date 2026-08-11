@@ -18,8 +18,8 @@ pub use prefix_set::load_prefix_sets_with_provider;
 pub use proof::{DatabaseProof, DatabaseStorageProof};
 pub use reth_db_api::tables::{PackedAccountsTrie, PackedStoragesTrie};
 pub use state::{
-    from_reverts_auto, state_root_with_committed_updates, DatabaseHashedPostState,
-    DatabaseStateRoot, STATE_ROOT_COMMIT_THRESHOLD,
+    state_root_with_committed_updates, DatabaseHashedPostState, DatabaseStateRoot,
+    STATE_ROOT_COMMIT_THRESHOLD,
 };
 pub use storage::{hashed_storage_from_reverts_with_provider, DatabaseStorageRoot};
 pub use trie_cursor::{

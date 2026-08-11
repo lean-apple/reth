@@ -61,8 +61,7 @@ impl<F> Copy for SnapStateWriter<'_, F> {}
 impl<'a, F> SnapStateWriter<'a, F>
 where
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StateWriter,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+    F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
 {
     /// Creates a writer over the given provider factory.
     pub const fn new(factory: &'a F) -> Self {
@@ -204,7 +203,6 @@ impl<F> SnapStateWriter<'_, F>
 where
     F: DatabaseProviderFactory,
     F::Provider: AccountExtReader + DBProvider,
-    <F::Provider as DBProvider>::Tx: DbTx,
 {
     /// Reads accounts in one provider transaction for block access list merging.
     pub fn read_accounts(
@@ -220,7 +218,6 @@ impl<F> SnapStateWriter<'_, F>
 where
     F: DatabaseProviderFactory,
     F::Provider: DBProvider,
-    <F::Provider as DBProvider>::Tx: DbTx,
 {
     /// Returns the generation that was interrupted before it was verified.
     ///
@@ -245,8 +242,7 @@ where
 impl<F> SnapStateWriter<'_, F>
 where
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + TrieWriter + StorageSettingsCache,
-    <F::ProviderRW as DBProvider>::Tx: DbTx + DbTxMut,
+    F::ProviderRW: DBProvider<Tx: DbTxMut> + TrieWriter + StorageSettingsCache,
 {
     /// Rebuilds the state trie over the downloaded hashed state and checks its root against
     /// `expected`, persisting the trie tables only if they match.
@@ -295,7 +291,7 @@ where
         let provider = self.factory.database_provider_rw().map_err(db_err)?;
         provider.tx_ref().clear::<tables::AccountsTrie>().map_err(db_err)?;
         provider.tx_ref().clear::<tables::StoragesTrie>().map_err(db_err)?;
-        provider.commit().map_err(db_err)?;
+        DBProvider::commit(provider).map_err(db_err)?;
         Ok(())
     }
 }
@@ -352,10 +348,7 @@ mod tests {
 
         let state = HashedPostState {
             accounts: accounts.iter().map(|(hash, account)| (*hash, Some(*account))).collect(),
-            storages: B256Map::from_iter([(
-                storage_owner(),
-                HashedStorage::from_iter(slots),
-            )]),
+            storages: B256Map::from_iter([(storage_owner(), HashedStorage::from_iter(slots))]),
         };
 
         let root = state_root_prehashed(accounts.iter().map(|(hash, account)| {

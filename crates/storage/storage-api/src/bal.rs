@@ -1,11 +1,9 @@
-use crate::BlockNumReader;
 use alloc::{sync::Arc, vec::Vec};
 use alloy_eip7928::bal::DecodedBal;
 pub use alloy_eip7928::bal::RawBal;
 use alloy_eips::NumHash;
 use alloy_primitives::{BlockHash, BlockNumber, Bytes};
 use reth_storage_errors::provider::ProviderResult;
-use revm::database::state::bal::Bal as RevmBal;
 
 /// Notification emitted when a new BAL is inserted into the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,7 +55,7 @@ pub trait BalStore: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Flushes pending BALs for the given blocks to the backing store.
+    /// Flushes pending BALs for the given canonical blocks to the backing store.
     ///
     /// In-memory implementations may treat this as a no-op.
     fn flush(&self, _blocks: &[NumHash]) -> ProviderResult<()> {
@@ -79,33 +77,12 @@ pub trait BalStore: Send + Sync + 'static {
         Ok(self.get_by_hashes(&[block_hash])?.into_iter().next().flatten())
     }
 
-    /// Fetches the BAL for a block number/hash pair.
-    fn get_by_block_num_hash(&self, block: NumHash) -> ProviderResult<Option<Bytes>> {
-        self.get_by_hash(block.hash)
-    }
-
     /// Fetches and decodes the BAL for the given block hash.
     fn get_decoded_by_hash(&self, block_hash: BlockHash) -> ProviderResult<Option<DecodedBal>> {
         self.get_by_hash(block_hash)?
             .map(DecodedBal::from_rlp_bytes)
             .transpose()
             .map_err(Into::into)
-    }
-
-    /// Fetches the BAL for the given block hash in revm representation.
-    fn revm_bal_by_hash(
-        &self,
-        block_hash: BlockHash,
-    ) -> ProviderResult<Option<DecodedBal<Arc<RevmBal>>>> {
-        self.get_decoded_by_hash(block_hash)?
-            .map(|decoded| {
-                decoded.try_map(|bal| {
-                    RevmBal::try_from(Vec::from(bal))
-                        .map(Arc::new)
-                        .map_err(reth_storage_errors::provider::ProviderError::other)
-                })
-            })
-            .transpose()
     }
 
     /// Fetch BAL response entries for the given block hashes, stopping after the soft limit is
@@ -202,7 +179,7 @@ impl BalStoreHandle {
         self.inner.insert_many(entries)
     }
 
-    /// Flushes pending BALs for the given blocks to the backing store.
+    /// Flushes pending BALs for the given canonical blocks to the backing store.
     #[inline]
     pub fn flush(&self, blocks: &[NumHash]) -> ProviderResult<()> {
         self.inner.flush(blocks)
@@ -226,25 +203,10 @@ impl BalStoreHandle {
         self.inner.get_by_hash(block_hash)
     }
 
-    /// Fetches the BAL for a block number/hash pair.
-    #[inline]
-    pub fn get_by_block_num_hash(&self, block: NumHash) -> ProviderResult<Option<Bytes>> {
-        self.inner.get_by_block_num_hash(block)
-    }
-
     /// Fetches and decodes the BAL for the given block hash.
     #[inline]
     pub fn get_decoded_by_hash(&self, block_hash: BlockHash) -> ProviderResult<Option<DecodedBal>> {
         self.inner.get_decoded_by_hash(block_hash)
-    }
-
-    /// Fetches the BAL for the given block hash in revm representation.
-    #[inline]
-    pub fn revm_bal_by_hash(
-        &self,
-        block_hash: BlockHash,
-    ) -> ProviderResult<Option<DecodedBal<Arc<RevmBal>>>> {
-        self.inner.revm_bal_by_hash(block_hash)
     }
 
     /// Fetch BAL response entries for the given block hashes, stopping after the soft limit is
@@ -294,6 +256,26 @@ impl core::fmt::Debug for BalStoreHandle {
 pub trait BalProvider {
     /// Returns the configured BAL store handle.
     fn bal_store(&self) -> &BalStoreHandle;
+
+    /// Fetches the BAL for the given block hash.
+    fn get_bal_by_hash(&self, block_hash: BlockHash) -> ProviderResult<Option<Bytes>> {
+        self.bal_store().get_by_hash(block_hash)
+    }
+
+    /// Fetches BALs for the given block hashes.
+    fn get_bals_by_hashes(&self, block_hashes: &[BlockHash]) -> ProviderResult<Vec<Option<Bytes>>> {
+        self.bal_store().get_by_hashes(block_hashes)
+    }
+
+    /// Fetches BAL response entries for the given block hashes, stopping after the soft limit is
+    /// exceeded.
+    fn get_bals_by_hashes_with_limit(
+        &self,
+        block_hashes: &[BlockHash],
+        limit: GetBlockAccessListLimit,
+    ) -> ProviderResult<Vec<Option<Bytes>>> {
+        self.bal_store().get_by_hashes_with_limit(block_hashes, limit)
+    }
 }
 
 /// No-op BAL store used as the default wiring target until a concrete implementation is injected.
@@ -341,78 +323,6 @@ impl BalStore for NoopBalStore {
     }
 }
 
-/// Fetches a BAL by hash, resolving its number when it is only on disk.
-pub fn get_bal_by_hash<Provider>(
-    provider: &Provider,
-    block_hash: BlockHash,
-) -> ProviderResult<Option<Bytes>>
-where
-    Provider: BalProvider + BlockNumReader + ?Sized,
-{
-    if let Some(bal) = provider.bal_store().get_by_hash(block_hash)? {
-        return Ok(Some(bal))
-    }
-
-    let Some(number) = provider.block_number(block_hash)? else { return Ok(None) };
-    provider.bal_store().get_by_block_num_hash(NumHash::new(number, block_hash))
-}
-
-/// Fetches BALs by hash and preserves the response soft limit.
-pub fn get_bals_by_hashes_with_limit<Provider>(
-    provider: &Provider,
-    hashes: &[BlockHash],
-    limit: GetBlockAccessListLimit,
-) -> ProviderResult<Vec<Option<Bytes>>>
-where
-    Provider: BalProvider + BlockNumReader + ?Sized,
-{
-    let mut out = Vec::new();
-    let mut size = 0;
-    for hash in hashes {
-        let bal = get_bal_by_hash(provider, *hash)?;
-        size += bal.as_ref().map_or(1, |bytes| bytes.len());
-        out.push(bal);
-        if limit.exceeds(size) {
-            break
-        }
-    }
-    out.shrink_to_fit();
-    Ok(out)
-}
-
-/// Fetches BALs by hash, resolving persisted entries through the provider.
-pub fn get_bals_by_hashes<Provider>(
-    provider: &Provider,
-    hashes: &[BlockHash],
-) -> ProviderResult<Vec<Option<Bytes>>>
-where
-    Provider: BalProvider + BlockNumReader + ?Sized,
-{
-    get_bals_by_hashes_with_limit(provider, hashes, GetBlockAccessListLimit::None)
-}
-
-/// Fetches and decodes a revm BAL, including persisted entries.
-pub fn get_revm_bal_by_hash<Provider>(
-    provider: &Provider,
-    block_hash: BlockHash,
-) -> ProviderResult<Option<DecodedBal<Arc<RevmBal>>>>
-where
-    Provider: BalProvider + BlockNumReader + ?Sized,
-{
-    get_bal_by_hash(provider, block_hash)?
-        .map(DecodedBal::from_rlp_bytes)
-        .transpose()
-        .map_err(reth_storage_errors::provider::ProviderError::from)?
-        .map(|decoded| {
-            decoded.try_map(|bal| {
-                RevmBal::try_from(Vec::from(bal))
-                    .map(Arc::new)
-                    .map_err(reth_storage_errors::provider::ProviderError::other)
-            })
-        })
-        .transpose()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +342,24 @@ mod tests {
         assert_eq!(by_hash, vec![None, None]);
         assert!(store.get_by_hash(B256::random()).unwrap().is_none());
         assert_eq!(store.prune(10).unwrap(), 0);
+    }
+
+    #[test]
+    fn noop_provider_returns_empty_results() {
+        let provider = crate::noop::NoopProvider::default();
+        let hashes = [B256::random(), B256::random()];
+
+        assert_eq!(provider.get_bals_by_hashes(&hashes).unwrap(), vec![None, None]);
+        assert_eq!(
+            provider
+                .get_bals_by_hashes_with_limit(
+                    &hashes,
+                    GetBlockAccessListLimit::ResponseSizeSoftLimit(0),
+                )
+                .unwrap(),
+            vec![None]
+        );
+        assert!(provider.get_bal_by_hash(B256::random()).unwrap().is_none());
     }
 
     #[test]
@@ -459,11 +387,6 @@ mod tests {
         let decoded = store.get_decoded_by_hash(hash).unwrap().unwrap();
 
         assert_eq!(decoded.as_raw(), &raw_bal);
-
-        let revm_bal = store.revm_bal_by_hash(hash).unwrap().unwrap();
-
-        assert_eq!(revm_bal.as_raw(), &raw_bal);
-        assert!(revm_bal.as_bal().accounts.is_empty());
     }
 
     #[test]
@@ -489,26 +412,6 @@ mod tests {
         assert!(size_limit_2mb.exceeds(3 * 1024 * 1024));
     }
 
-    #[test]
-    fn provider_lookup_resolves_persisted_bal_number() {
-        let block = NumHash::new(7, B256::random());
-        let raw_bal = Bytes::from_static(&[EMPTY_LIST_CODE]);
-        let store = BalStoreHandle::new(NumberOnlyBalStore { block, raw_bal: raw_bal.clone() });
-        let provider = TestBalProvider { block, store };
-        let missing = B256::random();
-
-        assert_eq!(get_bal_by_hash(&provider, block.hash).unwrap(), Some(raw_bal.clone()));
-        assert_eq!(
-            get_bals_by_hashes_with_limit(
-                &provider,
-                &[block.hash, missing],
-                GetBlockAccessListLimit::None,
-            )
-            .unwrap(),
-            vec![Some(raw_bal), None]
-        );
-    }
-
     #[cfg(feature = "std")]
     #[tokio::test]
     async fn noop_store_stream_is_empty() {
@@ -522,82 +425,6 @@ mod tests {
     struct TestBalStore {
         hash: B256,
         raw_bal: Bytes,
-    }
-
-    #[derive(Debug)]
-    struct NumberOnlyBalStore {
-        block: NumHash,
-        raw_bal: Bytes,
-    }
-
-    impl BalStore for NumberOnlyBalStore {
-        fn insert(&self, _num_hash: NumHash, _bal: RawBal) -> ProviderResult<()> {
-            Ok(())
-        }
-
-        fn prune(&self, _tip: BlockNumber) -> ProviderResult<usize> {
-            Ok(0)
-        }
-
-        fn get_by_hashes(&self, hashes: &[BlockHash]) -> ProviderResult<Vec<Option<Bytes>>> {
-            Ok(vec![None; hashes.len()])
-        }
-
-        fn get_by_block_num_hash(&self, block: NumHash) -> ProviderResult<Option<Bytes>> {
-            Ok((block == self.block).then(|| self.raw_bal.clone()))
-        }
-
-        #[cfg(feature = "std")]
-        fn bal_stream(&self) -> BalNotificationStream {
-            reth_tokio_util::EventSender::new(1).new_listener()
-        }
-    }
-
-    #[derive(Debug)]
-    struct TestBalProvider {
-        block: NumHash,
-        store: BalStoreHandle,
-    }
-
-    impl BalProvider for TestBalProvider {
-        fn bal_store(&self) -> &BalStoreHandle {
-            &self.store
-        }
-    }
-
-    impl crate::BlockHashReader for TestBalProvider {
-        fn block_hash(&self, number: BlockNumber) -> ProviderResult<Option<B256>> {
-            Ok((number == self.block.number).then_some(self.block.hash))
-        }
-
-        fn canonical_hashes_range(
-            &self,
-            _start: BlockNumber,
-            _end: BlockNumber,
-        ) -> ProviderResult<Vec<B256>> {
-            Ok(Vec::new())
-        }
-    }
-
-    impl BlockNumReader for TestBalProvider {
-        fn chain_info(&self) -> ProviderResult<reth_chainspec::ChainInfo> {
-            Ok(reth_chainspec::ChainInfo {
-                best_hash: self.block.hash,
-                best_number: self.block.number,
-            })
-        }
-
-        fn best_block_number(&self) -> ProviderResult<BlockNumber> {
-            Ok(self.block.number)
-        }
-
-        fn last_block_number(&self) -> ProviderResult<BlockNumber> {
-            Ok(self.block.number)
-        }
-
-        fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
-            Ok((hash == self.block.hash).then_some(self.block.number))
-        }
     }
 
     impl BalStore for TestBalStore {

@@ -352,10 +352,16 @@ tables! {
         type Value = StoredBlockWithdrawals;
     }
 
-    /// Stores block access lists by block number and hash.
+    /// Stores block access list payloads by block number and block hash.
     table BlockAccessLists {
         type Key = StoredBlockAccessListKey;
         type Value = StoredBlockAccessList;
+    }
+
+    /// Stores the block number for each persisted block access list hash.
+    table BlockAccessListBlockNumbers {
+        type Key = BlockHash;
+        type Value = BlockNumber;
     }
 
     /// Canonical only Stores the transaction body for canonical transactions.

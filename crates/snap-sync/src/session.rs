@@ -17,7 +17,7 @@ use crate::{
 use alloy_eip7928::bal::RawBal;
 use alloy_eips::NumHash;
 use alloy_primitives::{map::HashSet, Bytes, B256};
-use reth_db_api::transaction::{DbTx, DbTxMut};
+use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
 use reth_network_p2p::{
     error::RequestError,
@@ -62,9 +62,7 @@ where
     C: SnapClient + 'static,
     F: DatabaseProviderFactory,
     F::Provider: AccountExtReader + DBProvider,
-    F::ProviderRW: DBProvider + StateWriter + TrieWriter + StorageSettingsCache,
-    <F::Provider as DBProvider>::Tx: DbTx,
-    <F::ProviderRW as DBProvider>::Tx: DbTx + DbTxMut,
+    F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter + TrieWriter + StorageSettingsCache,
     H: CanonicalChainSource,
 {
     /// Creates an idle session.
@@ -368,11 +366,7 @@ where
     async fn verified_bal(&mut self, block: &BlockRef) -> Result<Bytes, SnapSyncError> {
         let expected = block.bal_hash.ok_or(SnapSyncError::MissingBal(block.number))?;
 
-        let cached = self
-            .bal_store
-            .get_by_block_num_hash(NumHash::new(block.number, block.hash))
-            .ok()
-            .flatten();
+        let cached = self.bal_store.get_by_hash(block.hash).ok().flatten();
 
         let (peer, bal) = match cached {
             // Already held by the node, so there is no peer to hold to account.
@@ -474,8 +468,8 @@ where
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
     F: DatabaseProviderFactory,
-    F::ProviderRW: DBProvider + StageCheckpointWriter + StateWriter + StaticFileProviderFactory,
-    <F::ProviderRW as DBProvider>::Tx: DbTxMut,
+    F::ProviderRW:
+        DBProvider<Tx: DbTxMut> + StageCheckpointWriter + StateWriter + StaticFileProviderFactory,
 {
     /// Clears the generation marker after the node has installed the verified head.
     pub fn accept(&mut self) -> Result<BlockRef, SnapSyncError> {
