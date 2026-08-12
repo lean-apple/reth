@@ -1,7 +1,14 @@
-//! Downloads and verifies snap/2 account ranges against [EIP-8189] pivot state roots.
+//! Downloads and verifies snap/2 state ranges against [EIP-8189] pivot state roots.
 //! Persistence and range selection are handled by the snap sync orchestrator.
 //!
 //! [EIP-8189]: https://eips.ethereum.org/EIPS/eip-8189
+
+mod storage;
+
+pub use storage::{
+    InvalidStorageRangeRequest, StorageRangeContinuation, StorageRangeDownloader,
+    StorageRangeOutcome, VerifiedStorageRange, VerifiedStorageRanges,
+};
 
 use alloy_primitives::B256;
 use futures::{Future, FutureExt};
