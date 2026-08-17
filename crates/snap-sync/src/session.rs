@@ -16,7 +16,7 @@ use crate::{
 };
 use alloy_eip7928::bal::RawBal;
 use alloy_eips::NumHash;
-use alloy_primitives::{map::HashSet, Bytes, B256};
+use alloy_primitives::{map::HashSet, B256};
 use reth_db_api::transaction::DbTxMut;
 use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
 use reth_network_p2p::{
@@ -234,7 +234,7 @@ where
                 }
                 Err(err) => return Err(err),
             };
-            let changes = decode_block_access_list(&bal, block.number)?;
+            let changes = decode_block_access_list(bal, block.number)?;
             BlockStateDiff::from_changes(&changes).apply(self.writer(), Some(covered_end))?;
             self.metrics.access_lists_applied.increment(1);
         }
@@ -289,7 +289,7 @@ where
                 }
                 Err(err) => return Err(err),
             };
-            let changes = decode_block_access_list(&bal, block.number)?;
+            let changes = decode_block_access_list(bal, block.number)?;
             BlockStateDiff::from_changes(&changes).apply(self.writer(), None)?;
 
             applied = block;
@@ -378,21 +378,23 @@ where
     /// Returns a block's access list, verified against the header's commitment.
     ///
     /// Prefers a list the engine already cached for this hash and falls back to a snap/2 request.
-    async fn verified_bal(&mut self, block: &BlockRef) -> Result<Bytes, SnapSyncError> {
+    async fn verified_bal(&mut self, block: &BlockRef) -> Result<RawBal, SnapSyncError> {
         let expected = block.bal_hash.ok_or(SnapSyncError::MissingBal(block.number))?;
 
         let cached = self.bal_store.get_by_hash(block.hash).ok().flatten();
 
         let (peer, bal) = match cached {
             // Already held by the node, so there is no peer to hold to account.
-            Some(bal) => (None, bal),
+            Some(bal) => (None, RawBal::new(bal)),
             None => {
                 let (peer, bal) = self.fetch_bal(block).await?;
                 (Some(peer), bal)
             }
         };
 
-        if RawBal::new(bal.clone()).hash() != expected {
+        // `RawBal` caches the hash it computes here, so the copy handed to the store and the
+        // decoder below is not hashed again.
+        if bal.ensure_hash(expected).is_err() {
             if let Some(peer) = peer {
                 self.client.report_bad_message(peer);
             }
@@ -406,7 +408,7 @@ where
         // through the same store instead of fetching it again on the next pass. Best-effort: the
         // list in hand is what matters.
         if peer.is_some() &&
-            let Err(err) = self.bal_store.insert(num_hash, RawBal::new(bal.clone()))
+            let Err(err) = self.bal_store.insert(num_hash, bal.clone())
         {
             debug!(target: "snap", %err, number = block.number, "Failed to cache fetched BAL");
         }
@@ -418,7 +420,7 @@ where
     async fn fetch_bal(
         &self,
         block: &BlockRef,
-    ) -> Result<(reth_network_peers::PeerId, Bytes), SnapSyncError> {
+    ) -> Result<(reth_network_peers::PeerId, RawBal), SnapSyncError> {
         let mut last_error = None;
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
@@ -435,7 +437,7 @@ where
     async fn request_bal(
         &self,
         block: &BlockRef,
-    ) -> Result<(reth_network_peers::PeerId, Bytes), SnapSyncError> {
+    ) -> Result<(reth_network_peers::PeerId, RawBal), SnapSyncError> {
         let response = self
             .client
             .get_block_access_lists(GetBlockAccessListsMessage {
@@ -472,7 +474,7 @@ where
             .flatten()
             .ok_or(SnapSyncError::MissingBal(block.number))?;
 
-        Ok((peer, bal))
+        Ok((peer, RawBal::new(bal)))
     }
 
     const fn writer(&self) -> SnapStateWriter<'_, F> {

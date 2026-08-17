@@ -9,13 +9,15 @@
 //! account already in the database rather than overwriting it.
 
 use crate::{error::SnapSyncError, store::SnapStateWriter};
-use alloy_eip7928::AccountChanges;
+use alloy_eip7928::{
+    bal::{Bal, DecodedBal, RawBal},
+    AccountChanges,
+};
 use alloy_primitives::{
     keccak256,
     map::{AddressMap, B256Map, B256Set},
     Address, Bytes, B256, U256,
 };
-use alloy_rlp::Decodable;
 use reth_db_api::transaction::DbTxMut;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{AccountExtReader, DBProvider, StateWriter};
@@ -129,12 +131,14 @@ impl BlockStateDiff {
     }
 }
 
-/// Decodes the raw RLP payload of a block access list.
+/// Decodes a block access list whose hash has already been checked against its header.
+///
+/// Rejects trailing bytes, which a raw `Vec<AccountChanges>` decode would ignore.
 pub(crate) fn decode_block_access_list(
-    bal: &Bytes,
+    bal: RawBal,
     block_number: u64,
-) -> Result<Vec<AccountChanges>, SnapSyncError> {
-    Vec::<AccountChanges>::decode(&mut bal.as_ref()).map_err(|err| {
+) -> Result<Bal, SnapSyncError> {
+    DecodedBal::from_raw_bal(bal).map(|decoded| decoded.split().0).map_err(|err| {
         SnapSyncError::RlpDecode(format!("block access list for block {block_number}: {err}"))
     })
 }
@@ -251,7 +255,9 @@ mod tests {
 
     #[test]
     fn decode_rejects_malformed_payloads() {
-        assert!(decode_block_access_list(&Bytes::from_static(&[0xff, 0xff]), 1).is_err());
+        assert!(
+            decode_block_access_list(RawBal::new(Bytes::from_static(&[0xff, 0xff])), 1).is_err()
+        );
     }
 
     #[test]
@@ -263,6 +269,9 @@ mod tests {
         let mut encoded = Vec::new();
         alloy_rlp::encode_list(&list, &mut encoded);
 
-        assert_eq!(decode_block_access_list(&encoded.into(), 1).unwrap(), list);
+        assert_eq!(
+            decode_block_access_list(RawBal::new(encoded.into()), 1).unwrap().into_inner(),
+            list
+        );
     }
 }
