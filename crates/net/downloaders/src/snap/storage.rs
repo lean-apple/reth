@@ -36,6 +36,17 @@ where
         accounts: &[(B256, TrieAccount)],
         runtime: Runtime,
     ) -> Result<Self, InvalidStorageRangeRequest> {
+        Self::new_excluding(client, request, accounts, runtime, Vec::new())
+    }
+
+    /// Creates a downloader that will not select peers already tried for this logical range.
+    pub fn new_excluding(
+        client: C,
+        request: GetStorageRangesMessage,
+        accounts: &[(B256, TrieAccount)],
+        runtime: Runtime,
+        excluded_peers: Vec<PeerId>,
+    ) -> Result<Self, InvalidStorageRangeRequest> {
         let origin = request.starting_hash.unwrap_or(B256::ZERO);
         let limit = request.limit_hash.unwrap_or(MAX_HASH);
         if origin > limit {
@@ -66,7 +77,7 @@ where
         }
 
         let verifier = StorageProofVerifier { request: request.clone(), storage_roots };
-        Ok(Self(VerifyingRequest::new(client, request, verifier, runtime)))
+        Ok(Self(VerifyingRequest::new(client, request, verifier, runtime, excluded_peers)))
     }
 }
 

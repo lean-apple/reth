@@ -46,6 +46,16 @@ where
         request: GetAccountRangeMessage,
         runtime: Runtime,
     ) -> Result<Self, InvalidAccountRange> {
+        Self::new_excluding(client, request, runtime, Vec::new())
+    }
+
+    /// Creates a downloader that will not select peers already tried for this logical range.
+    pub fn new_excluding(
+        client: C,
+        request: GetAccountRangeMessage,
+        runtime: Runtime,
+        excluded_peers: Vec<PeerId>,
+    ) -> Result<Self, InvalidAccountRange> {
         if request.starting_hash > request.limit_hash {
             return Err(InvalidAccountRange {
                 origin: request.starting_hash,
@@ -53,7 +63,7 @@ where
             })
         }
         let verifier = AccountRangeVerifier { request: request.clone() };
-        Ok(Self(VerifyingRequest::new(client, request, verifier, runtime)))
+        Ok(Self(VerifyingRequest::new(client, request, verifier, runtime, excluded_peers)))
     }
 }
 

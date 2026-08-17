@@ -590,7 +590,7 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
                 return
             }
             // Nothing the peer did, so its reputation is left alone.
-            RequestError::Internal => return,
+            RequestError::Internal | RequestError::NoEligiblePeers => return,
             RequestError::BadResponse => return self.report_peer_bad_transactions(peer_id),
         };
         self.report_peer(peer_id, kind);

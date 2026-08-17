@@ -22,6 +22,7 @@ where
         cursor: B256,
     ) -> Result<AccountRangeOutcome, SnapSyncError> {
         let mut unavailable = None;
+        let mut excluded_peers = Vec::new();
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             let request = GetAccountRangeMessage {
@@ -31,13 +32,24 @@ where
                 limit_hash: MAX_HASH,
                 response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
             };
-            let downloader =
-                AccountRangeDownloader::new(self.client.clone(), request, self.runtime.clone())
-                    .map_err(|error| SnapSyncError::Network(error.to_string()))?;
+            let downloader = AccountRangeDownloader::new_excluding(
+                self.client.clone(),
+                request,
+                self.runtime.clone(),
+                excluded_peers.clone(),
+            )
+            .map_err(|error| SnapSyncError::Network(error.to_string()))?;
 
-            match downloader.await.map_err(account_range_error)? {
-                outcome @ AccountRangeOutcome::Verified(_) => return Ok(outcome),
-                AccountRangeOutcome::Unavailable { peer_id } => unavailable = Some(peer_id),
+            match downloader.await {
+                Ok(outcome @ AccountRangeOutcome::Verified(_)) => return Ok(outcome),
+                Ok(AccountRangeOutcome::Unavailable { peer_id }) => {
+                    unavailable = Some(peer_id);
+                    if !excluded_peers.contains(&peer_id) {
+                        excluded_peers.push(peer_id);
+                    }
+                }
+                Err(RequestError::NoEligiblePeers) if unavailable.is_some() => break,
+                Err(error) => return Err(account_range_error(error)),
             }
         }
 

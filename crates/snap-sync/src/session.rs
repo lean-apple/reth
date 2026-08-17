@@ -18,10 +18,10 @@ use alloy_eip7928::bal::RawBal;
 use alloy_eips::NumHash;
 use alloy_primitives::{map::HashSet, B256};
 use reth_db_api::transaction::DbTxMut;
-use reth_eth_wire_types::snap::GetBlockAccessListsMessage;
+use reth_eth_wire_types::snap::{GetBlockAccessListsMessage, SnapProtocolMessage};
 use reth_network_p2p::{
     error::RequestError,
-    snap::client::{SnapClient, SnapResponse},
+    snap::client::{SnapClient, SnapRequestOptions, SnapResponse},
 };
 use reth_provider::{DatabaseProviderFactory, StaticFileProviderFactory};
 use reth_storage_api::{
@@ -378,7 +378,7 @@ where
             // Already held by the node, so there is no peer to hold to account.
             Some(bal) => (None, RawBal::new(bal)),
             None => {
-                let (peer, bal) = self.fetch_bal(block).await?;
+                let (peer, bal) = self.fetch_bal(block, expected).await?;
                 (Some(peer), bal)
             }
         };
@@ -411,61 +411,68 @@ where
     async fn fetch_bal(
         &self,
         block: &BlockRef,
+        expected: B256,
     ) -> Result<(reth_network_peers::PeerId, RawBal), SnapSyncError> {
         let mut last_error = None;
+        let mut excluded_peers = Vec::new();
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
-            match self.request_bal(block).await {
-                Ok(found) => return Ok(found),
-                Err(SnapSyncError::NoSnapPeers) => return Err(SnapSyncError::NoSnapPeers),
-                Err(err) => last_error = Some(err),
+            let response = match self
+                .client
+                .request_snap(
+                    SnapProtocolMessage::GetBlockAccessLists(GetBlockAccessListsMessage {
+                        request_id: self.request_id.fetch_add(1, Ordering::Relaxed),
+                        block_hashes: vec![block.hash],
+                        response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                    }),
+                    SnapRequestOptions::default().excluding(excluded_peers.clone()),
+                )
+                .await
+            {
+                Ok(response) => response,
+                // Spending an attempt cannot help: the network layer rejects snap requests
+                // outright while no connected peer advertises the capability.
+                Err(RequestError::UnsupportedCapability) => return Err(SnapSyncError::NoSnapPeers),
+                Err(RequestError::NoEligiblePeers) if last_error.is_some() => break,
+                Err(err) => {
+                    last_error = Some(SnapSyncError::Network(format!(
+                        "snap BAL request for {}: {err}",
+                        block.hash
+                    )));
+                    continue
+                }
+            };
+
+            let (peer, data) = response.split();
+            let SnapResponse::BlockAccessLists(msg) = data else {
+                self.client.report_bad_message(peer);
+                excluded_peers.push(peer);
+                last_error = Some(SnapSyncError::Network(format!(
+                    "expected a block access lists response for {}",
+                    block.hash
+                )));
+                continue
+            };
+
+            // Peers signal "I don't have this one" with an empty entry rather than a short reply,
+            // so an absent entry excludes that peer without penalizing it.
+            let Some(bal) = msg.block_access_lists.0.into_iter().next().flatten() else {
+                excluded_peers.push(peer);
+                last_error = Some(SnapSyncError::MissingBal(block.number));
+                continue
+            };
+            let bal = RawBal::new(bal);
+            if bal.ensure_hash(expected).is_err() {
+                self.client.report_bad_message(peer);
+                excluded_peers.push(peer);
+                last_error = Some(SnapSyncError::BalVerification { block: block.number, expected });
+                continue
             }
+
+            return Ok((peer, bal))
         }
 
         Err(last_error.expect("at least one attempt was made"))
-    }
-
-    async fn request_bal(
-        &self,
-        block: &BlockRef,
-    ) -> Result<(reth_network_peers::PeerId, RawBal), SnapSyncError> {
-        let response = self
-            .client
-            .get_block_access_lists(GetBlockAccessListsMessage {
-                request_id: self.request_id.fetch_add(1, Ordering::Relaxed),
-                block_hashes: vec![block.hash],
-                response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-            })
-            .await
-            .map_err(|err| match err {
-                // Spending an attempt cannot help: the network layer rejects snap requests
-                // outright while no connected peer advertises the capability.
-                RequestError::UnsupportedCapability => SnapSyncError::NoSnapPeers,
-                err => {
-                    SnapSyncError::Network(format!("snap BAL request for {}: {err}", block.hash))
-                }
-            })?;
-
-        let (peer, data) = response.split();
-        let SnapResponse::BlockAccessLists(msg) = data else {
-            self.client.report_bad_message(peer);
-            return Err(SnapSyncError::Network(format!(
-                "expected a block access lists response for {}",
-                block.hash
-            )))
-        };
-
-        // Peers signal "I don't have this one" with an empty entry rather than a short reply, so
-        // an absent entry is a legitimate answer and not grounds for penalizing.
-        let bal = msg
-            .block_access_lists
-            .0
-            .into_iter()
-            .next()
-            .flatten()
-            .ok_or(SnapSyncError::MissingBal(block.number))?;
-
-        Ok((peer, RawBal::new(bal)))
     }
 
     const fn writer(&self) -> SnapStateWriter<'_, F> {

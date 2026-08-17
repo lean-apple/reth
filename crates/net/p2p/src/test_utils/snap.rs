@@ -4,13 +4,10 @@ use crate::{
     download::DownloadClient,
     error::{PeerRequestResult, RequestError},
     priority::Priority,
-    snap::client::{SnapClient, SnapResponse},
+    snap::client::{SnapClient, SnapRequestOptions, SnapResponse},
 };
 use futures::future::{ready, Ready};
-use reth_eth_wire_types::snap::{
-    GetAccountRangeMessage, GetBlockAccessListsMessage, GetByteCodesMessage,
-    GetStorageRangesMessage,
-};
+use reth_eth_wire_types::snap::SnapProtocolMessage;
 use reth_network_peers::PeerId;
 use std::{
     collections::VecDeque,
@@ -88,35 +85,11 @@ impl DownloadClient for TestSnapClient {
 impl SnapClient for TestSnapClient {
     type Output = Ready<PeerRequestResult<SnapResponse>>;
 
-    fn get_account_range_with_priority(
+    fn request_snap(
         &self,
-        _request: GetAccountRangeMessage,
-        priority: Priority,
+        _request: SnapProtocolMessage,
+        options: SnapRequestOptions,
     ) -> Self::Output {
-        self.next(priority)
-    }
-
-    fn get_storage_ranges_with_priority(
-        &self,
-        _request: GetStorageRangesMessage,
-        priority: Priority,
-    ) -> Self::Output {
-        self.next(priority)
-    }
-
-    fn get_byte_codes_with_priority(
-        &self,
-        _request: GetByteCodesMessage,
-        priority: Priority,
-    ) -> Self::Output {
-        self.next(priority)
-    }
-
-    fn get_block_access_lists_with_priority(
-        &self,
-        _request: GetBlockAccessListsMessage,
-        priority: Priority,
-    ) -> Self::Output {
-        self.next(priority)
+        self.next(options.priority)
     }
 }

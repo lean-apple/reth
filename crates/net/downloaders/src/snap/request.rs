@@ -1,11 +1,13 @@
 //! The retry-and-verify loop shared by the snap range downloaders.
 
 use futures::FutureExt;
-use reth_eth_wire_types::snap::{GetAccountRangeMessage, GetStorageRangesMessage};
+use reth_eth_wire_types::snap::{
+    GetAccountRangeMessage, GetStorageRangesMessage, SnapProtocolMessage,
+};
 use reth_network_p2p::{
     error::RequestError,
     priority::Priority,
-    snap::client::{SnapClient, SnapResponse},
+    snap::client::{SnapClient, SnapRequestOptions, SnapResponse},
 };
 use reth_network_peers::PeerId;
 use reth_tasks::Runtime;
@@ -30,6 +32,8 @@ pub(super) struct VerifyingRequest<C: SnapClient, V: SnapVerifier> {
     verifier: V,
     fut: C::Output,
     verification: Option<VerificationTask<V::Output>>,
+    excluded_peers: Vec<PeerId>,
+    rejected_response: bool,
     retries: u8,
 }
 
@@ -39,9 +43,26 @@ where
     V: SnapVerifier,
 {
     /// Submits `request` at normal priority and verifies its response with `verifier`.
-    pub(super) fn new(client: C, request: V::Request, verifier: V, runtime: Runtime) -> Self {
-        let fut = request.send(&client, Priority::Normal);
-        Self { client, runtime, request, verifier, fut, verification: None, retries: 0 }
+    pub(super) fn new(
+        client: C,
+        request: V::Request,
+        verifier: V,
+        runtime: Runtime,
+        excluded_peers: Vec<PeerId>,
+    ) -> Self {
+        let fut =
+            request.send(&client, SnapRequestOptions::default().excluding(excluded_peers.clone()));
+        Self {
+            client,
+            runtime,
+            request,
+            verifier,
+            fut,
+            verification: None,
+            excluded_peers,
+            rejected_response: false,
+            retries: 0,
+        }
     }
 
     /// Polls until the request yields a verified response or runs out of retries.
@@ -73,6 +94,9 @@ where
                         return Poll::Ready(Err(error))
                     }
                 }
+                Err(RequestError::NoEligiblePeers) if self.rejected_response => {
+                    return Poll::Ready(Err(RequestError::BadResponse))
+                }
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
@@ -84,7 +108,10 @@ where
             return false
         }
         self.retries += 1;
-        self.fut = self.request.send(&self.client, Priority::High);
+        self.fut = self.request.send(
+            &self.client,
+            SnapRequestOptions::new(Priority::High).excluding(self.excluded_peers.clone()),
+        );
         true
     }
 
@@ -103,6 +130,10 @@ where
             Ok(Err(error)) => {
                 debug!(target: "downloaders::snap", ?peer_id, %error, "Invalid snap response");
                 self.client.report_bad_message(peer_id);
+                if !self.excluded_peers.contains(&peer_id) {
+                    self.excluded_peers.push(peer_id);
+                }
+                self.rejected_response = true;
                 Poll::Ready(self.retry().then_some(None).ok_or(error))
             }
             // The task panicked or the runtime is shutting down. Neither is the peer's doing, so
@@ -128,6 +159,7 @@ where
             .field("request", &self.request)
             .field("verifier", &self.verifier)
             .field("verifying", &self.verification.is_some())
+            .field("excluded_peers", &self.excluded_peers)
             .field("retries", &self.retries)
             .finish_non_exhaustive()
     }
@@ -136,18 +168,18 @@ where
 /// A snap request message that can be reissued at a chosen priority.
 pub(super) trait SnapRequest: Clone + Send + 'static {
     /// Sends this request through `client`.
-    fn send<C: SnapClient>(&self, client: &C, priority: Priority) -> C::Output;
+    fn send<C: SnapClient>(&self, client: &C, options: SnapRequestOptions) -> C::Output;
 }
 
 impl SnapRequest for GetAccountRangeMessage {
-    fn send<C: SnapClient>(&self, client: &C, priority: Priority) -> C::Output {
-        client.get_account_range_with_priority(self.clone(), priority)
+    fn send<C: SnapClient>(&self, client: &C, options: SnapRequestOptions) -> C::Output {
+        client.request_snap(SnapProtocolMessage::GetAccountRange(self.clone()), options)
     }
 }
 
 impl SnapRequest for GetStorageRangesMessage {
-    fn send<C: SnapClient>(&self, client: &C, priority: Priority) -> C::Output {
-        client.get_storage_ranges_with_priority(self.clone(), priority)
+    fn send<C: SnapClient>(&self, client: &C, options: SnapRequestOptions) -> C::Output {
+        client.request_snap(SnapProtocolMessage::GetStorageRanges(self.clone()), options)
     }
 }
 
@@ -169,4 +201,60 @@ pub(super) trait SnapVerifier: Clone + Send + 'static {
 struct VerificationTask<O> {
     peer_id: PeerId,
     fut: tokio::task::JoinHandle<Result<O, RequestError>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future::poll_fn;
+    use reth_eth_wire_types::snap::{AccountRangeMessage, GetAccountRangeMessage};
+    use reth_network_p2p::test_utils::TestSnapClient;
+    use reth_network_peers::WithPeerId;
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug)]
+    struct PanickingVerifier;
+
+    impl SnapVerifier for PanickingVerifier {
+        type Request = GetAccountRangeMessage;
+        type Output = ();
+
+        fn verify(
+            self,
+            _peer_id: PeerId,
+            _response: SnapResponse,
+        ) -> Result<Self::Output, RequestError> {
+            panic!("local verifier panic")
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_panic_is_internal_and_does_not_penalize_peer() {
+        let peer = PeerId::random();
+        let response = SnapResponse::AccountRange(AccountRangeMessage {
+            request_id: 1,
+            accounts: Vec::new(),
+            proof: Vec::new(),
+        });
+        let client = Arc::new(TestSnapClient::new([Ok(WithPeerId::new(peer, response))]));
+        let request = GetAccountRangeMessage {
+            request_id: 1,
+            root_hash: Default::default(),
+            starting_hash: Default::default(),
+            limit_hash: Default::default(),
+            response_bytes: 0,
+        };
+        let mut verifying = VerifyingRequest::new(
+            Arc::clone(&client),
+            request,
+            PanickingVerifier,
+            Runtime::test(),
+            Vec::new(),
+        );
+
+        let error = poll_fn(|cx| verifying.poll_verified(cx)).await.unwrap_err();
+
+        assert_eq!(error, RequestError::Internal);
+        assert!(client.reported().is_empty());
+    }
 }

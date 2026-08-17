@@ -76,6 +76,8 @@ where
         accounts: &[(B256, TrieAccount)],
         starting_hash: B256,
     ) -> Result<Option<VerifiedStorageRanges>, SnapSyncError> {
+        let mut excluded_peers = Vec::new();
+
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             let request = GetStorageRangesMessage {
                 request_id: self.next_request_id(),
@@ -87,19 +89,25 @@ where
                 limit_hash: RangeBound::default(),
                 response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
             };
-            let downloader = StorageRangeDownloader::new(
+            let downloader = StorageRangeDownloader::new_excluding(
                 self.client.clone(),
                 request,
                 accounts,
                 self.runtime.clone(),
+                excluded_peers.clone(),
             )
             .map_err(|error| SnapSyncError::Network(error.to_string()))?;
 
-            match downloader.await.map_err(storage_range_error)? {
-                StorageRangeOutcome::Verified(range) => return Ok(Some(range)),
-                StorageRangeOutcome::Unavailable { peer_id } => {
+            match downloader.await {
+                Ok(StorageRangeOutcome::Verified(range)) => return Ok(Some(range)),
+                Ok(StorageRangeOutcome::Unavailable { peer_id }) => {
                     tracing::debug!(target: "snap", ?peer_id, "Peer lacks requested storage range");
+                    if !excluded_peers.contains(&peer_id) {
+                        excluded_peers.push(peer_id);
+                    }
                 }
+                Err(RequestError::NoEligiblePeers) if !excluded_peers.is_empty() => break,
+                Err(error) => return Err(storage_range_error(error)),
             }
         }
 

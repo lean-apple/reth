@@ -8,10 +8,10 @@ use alloy_primitives::{
     Bytes, B256,
 };
 use reth_db_api::transaction::DbTxMut;
-use reth_eth_wire_types::snap::GetByteCodesMessage;
+use reth_eth_wire_types::snap::{GetByteCodesMessage, SnapProtocolMessage};
 use reth_network_p2p::{
     error::RequestError,
-    snap::client::{SnapClient, SnapResponse},
+    snap::client::{SnapClient, SnapRequestOptions, SnapResponse},
 };
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
@@ -71,22 +71,27 @@ where
         hashes: &[B256],
     ) -> Result<Vec<(B256, Bytes)>, SnapSyncError> {
         let mut last_error = None;
+        let mut excluded_peers = Vec::new();
 
         for _ in 0..MAX_REQUEST_ATTEMPTS {
             let request_id = self.next_request_id();
             let response = match self
                 .client
-                .get_byte_codes(GetByteCodesMessage {
-                    request_id,
-                    hashes: hashes.to_vec(),
-                    response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
-                })
+                .request_snap(
+                    SnapProtocolMessage::GetByteCodes(GetByteCodesMessage {
+                        request_id,
+                        hashes: hashes.to_vec(),
+                        response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
+                    }),
+                    SnapRequestOptions::default().excluding(excluded_peers.clone()),
+                )
                 .await
             {
                 Ok(response) => response,
                 // Spending an attempt cannot help: the network layer rejects snap requests
                 // outright while no connected peer advertises the capability.
                 Err(RequestError::UnsupportedCapability) => return Err(SnapSyncError::NoSnapPeers),
+                Err(RequestError::NoEligiblePeers) if last_error.is_some() => break,
                 Err(err) => {
                     last_error = Some(SnapSyncError::Network(format!(
                         "snap bytecode request failed: {err}"
@@ -101,12 +106,16 @@ where
                     peer,
                     SnapSyncError::Network("expected a byte codes response".into()),
                 ));
+                excluded_peers.push(peer);
                 continue
             };
 
             match match_bytecodes(hashes, &msg.codes) {
                 Ok(codes) => return Ok(codes),
-                Err(err) => last_error = Some(self.penalize(peer, err)),
+                Err(err) => {
+                    last_error = Some(self.penalize(peer, err));
+                    excluded_peers.push(peer);
+                }
             }
         }
 

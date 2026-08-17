@@ -65,6 +65,7 @@ impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
                 RequestError::ChannelClosed |
                 RequestError::ConnectionDropped |
                 RequestError::UnsupportedCapability |
+                RequestError::NoEligiblePeers |
                 RequestError::BadResponse |
                 RequestError::Internal => None,
                 RequestError::Timeout => Some(ReputationChangeKind::Timeout),
@@ -92,6 +93,9 @@ pub enum RequestError {
     /// Indicates an unsupported capability message from the remote peer.
     #[display("capability message is not supported by remote peer")]
     UnsupportedCapability,
+    /// Every capable peer was already tried for this logical request.
+    #[display("all capable peers were already tried")]
+    NoEligiblePeers,
     /// Request timed out while awaiting response.
     /// Represents a timeout while waiting for a response.
     #[display("request timed out while awaiting response")]
