@@ -9,6 +9,7 @@
 //! mixing two chains together.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::{BlockNumber, B256};
 use parking_lot::RwLock;
 use reth_provider::{DatabaseProviderFactory, HeaderProvider};
@@ -33,6 +34,19 @@ pub struct BlockRef {
     pub state_root: B256,
     /// EIP-7928 access list commitment from this block's header, when the fork is active.
     pub bal_hash: Option<B256>,
+}
+
+impl BlockRef {
+    /// Returns this block's identity in the form reth's block-keyed APIs take.
+    pub const fn num_hash(&self) -> NumHash {
+        NumHash::new(self.number, self.hash)
+    }
+}
+
+impl From<BlockRef> for NumHash {
+    fn from(block: BlockRef) -> Self {
+        block.num_hash()
+    }
 }
 
 /// The canonical chain, as far as snap sync is concerned.

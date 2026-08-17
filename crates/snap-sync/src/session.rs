@@ -392,7 +392,7 @@ where
             return Err(SnapSyncError::BalVerification { block: block.number, expected })
         }
 
-        let num_hash = NumHash::new(block.number, block.hash);
+        let num_hash = block.num_hash();
         self.verified_bal_blocks.insert(num_hash);
 
         // A list fetched from a peer is now as trustworthy as one a payload carried, so share it
