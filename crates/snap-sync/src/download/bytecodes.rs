@@ -104,7 +104,7 @@ where
                 continue
             };
 
-            match Self::match_bytecodes(hashes, &msg.codes) {
+            match match_bytecodes(hashes, &msg.codes) {
                 Ok(codes) => return Ok(codes),
                 Err(err) => last_error = Some(self.penalize(peer, err)),
             }
@@ -114,47 +114,42 @@ where
     }
 }
 
-// Checks that need neither a client nor a database.
-impl<C, F> StateDownloader<'_, C, F> {
-    /// Pairs returned bytecodes with the hashes that were requested.
-    ///
-    /// Servers may drop entries they don't have but must keep request order, so a short reply is a
-    /// valid prefix while a reordered or duplicated one is not. The hashes it left out are
-    /// re-requested by [`collect_bytecodes`](Self::collect_bytecodes) rather than dropped.
-    fn match_bytecodes(
-        requested_hashes: &[B256],
-        codes: &[Bytes],
-    ) -> Result<Vec<(B256, Bytes)>, SnapSyncError> {
-        let requested: B256Map<usize> =
-            requested_hashes.iter().copied().enumerate().map(|(i, hash)| (hash, i)).collect();
-        let mut last_position = None;
-        let mut matched = Vec::with_capacity(codes.len());
+/// Pairs returned bytecodes with the hashes that were requested.
+///
+/// Servers may drop entries they don't have but must keep request order, so a short reply is a
+/// valid prefix while a reordered or duplicated one is not. The hashes it left out are
+/// re-requested by [`StateDownloader::collect_bytecodes`] rather than dropped.
+fn match_bytecodes(
+    requested_hashes: &[B256],
+    codes: &[Bytes],
+) -> Result<Vec<(B256, Bytes)>, SnapSyncError> {
+    let requested: B256Map<usize> =
+        requested_hashes.iter().copied().enumerate().map(|(i, hash)| (hash, i)).collect();
+    let mut last_position = None;
+    let mut matched = Vec::with_capacity(codes.len());
 
-        for code in codes {
-            let hash = keccak256(code.as_ref());
-            let Some(position) = requested.get(&hash).copied() else {
-                return Err(SnapSyncError::Network(format!(
-                    "snap bytecode response contained unrequested code hash {hash}"
-                )))
-            };
-            if last_position.is_some_and(|last| position <= last) {
-                return Err(SnapSyncError::Network(
-                    "snap bytecode response was not in request order".into(),
-                ))
-            }
-            last_position = Some(position);
-            matched.push((hash, code.clone()));
+    for code in codes {
+        let hash = keccak256(code.as_ref());
+        let Some(position) = requested.get(&hash).copied() else {
+            return Err(SnapSyncError::Network(format!(
+                "snap bytecode response contained unrequested code hash {hash}"
+            )))
+        };
+        if last_position.is_some_and(|last| position <= last) {
+            return Err(SnapSyncError::Network(
+                "snap bytecode response was not in request order".into(),
+            ))
         }
-
-        Ok(matched)
+        last_position = Some(position);
+        matched.push((hash, code.clone()));
     }
+
+    Ok(matched)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    type Downloader<'a> = StateDownloader<'a, (), ()>;
 
     #[test]
     fn bytecode_matching_accepts_a_short_prefix() {
@@ -162,8 +157,7 @@ mod tests {
         let second = Bytes::from_static(&[4, 5, 6]);
         let requested = [keccak256(first.as_ref()), keccak256(second.as_ref())];
 
-        let matched =
-            Downloader::match_bytecodes(&requested, std::slice::from_ref(&first)).unwrap();
+        let matched = match_bytecodes(&requested, std::slice::from_ref(&first)).unwrap();
 
         assert_eq!(matched, vec![(keccak256(first.as_ref()), first)]);
     }
@@ -172,7 +166,7 @@ mod tests {
     fn bytecode_matching_rejects_unrequested_code() {
         let requested = [keccak256([1, 2, 3])];
 
-        assert!(Downloader::match_bytecodes(&requested, &[Bytes::from_static(&[4, 5, 6])]).is_err());
+        assert!(match_bytecodes(&requested, &[Bytes::from_static(&[4, 5, 6])]).is_err());
     }
 
     #[test]
@@ -181,7 +175,7 @@ mod tests {
         let second = Bytes::from_static(&[4, 5, 6]);
         let requested = [keccak256(first.as_ref()), keccak256(second.as_ref())];
 
-        assert!(Downloader::match_bytecodes(&requested, &[second, first.clone()]).is_err());
-        assert!(Downloader::match_bytecodes(&requested, &[first.clone(), first]).is_err());
+        assert!(match_bytecodes(&requested, &[second, first.clone()]).is_err());
+        assert!(match_bytecodes(&requested, &[first.clone(), first]).is_err());
     }
 }
