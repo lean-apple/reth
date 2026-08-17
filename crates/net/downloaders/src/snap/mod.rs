@@ -86,6 +86,11 @@ pub struct VerifiedAccountRange {
     /// Accounts in strictly increasing hashed-key order.
     pub accounts: Vec<(B256, TrieAccount)>,
     /// Whether another request is needed to complete the requested interval.
+    ///
+    /// Conservative in the safe direction. A right-side subtree the proof left unexpanded is only
+    /// known by its prefix, so the next key is bounded by that prefix zero-filled, which can fall
+    /// inside the requested interval when the real key does not. `false` therefore means the
+    /// interval is definitely covered, while `true` can cost one request that returns nothing new.
     pub has_more: bool,
 }
 

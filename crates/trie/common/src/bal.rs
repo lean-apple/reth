@@ -4,6 +4,11 @@
 //! zero, and consuming these values means merging them onto the account state that came before
 //! the block. This is the shared reading of an entry; how the result is used — streamed into a
 //! state-root job, or written to hashed tables — stays with the caller.
+//!
+//! Post-block values are taken by highest block access index rather than by position. Alloy's
+//! `AccountChanges::storage_post_states` reads the last entry instead, which is the same answer
+//! only for a list in canonical EIP-7928 order. Not depending on that ordering means these
+//! readers are also correct for a list that has not been checked against a header commitment.
 
 use alloc::vec::Vec;
 use alloy_eip7928::AccountChanges;

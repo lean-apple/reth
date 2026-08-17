@@ -389,6 +389,10 @@ pub enum RangeProofError {
 /// Verifies a consecutive leaf range against `root`, starting at `origin`.
 ///
 /// Returns a lower bound for the next key, or `None` if the range exhausts the trie.
+///
+/// The bound is exact when the proof expanded the leaf after the range, and the subtree prefix
+/// zero-filled when it did not, so a caller comparing it against a limit can conclude that the
+/// trie continues past the limit but not that it continues before it.
 pub fn verify_range_proof<I, V>(
     root: B256,
     origin: B256,
