@@ -18,7 +18,7 @@ struct RangeProofVerifier<'a> {
     // Determines which trie paths belong to the response and which remain proof-owned.
     range: ProofRange,
     // Resolves hashed boundary references without depending on proof wire order.
-    nodes: ProofNodes<'a>,
+    nodes: ProofNodeIndex<'a>,
     // Accumulates the disjoint entries needed to reconstruct the requested root.
     frontier: ProofFrontier,
     // Tracks the lowest known path after the response to report whether the trie continues.
@@ -30,7 +30,7 @@ impl<'a> RangeProofVerifier<'a> {
     fn new(left: B256, right: B256, proof: &'a [Bytes], frontier: ProofFrontier) -> Self {
         Self {
             range: ProofRange::new(left, right),
-            nodes: ProofNodes::new(proof),
+            nodes: ProofNodeIndex::new(proof),
             frontier,
             next: None,
         }
@@ -217,9 +217,11 @@ enum KeyRelation {
 }
 
 // Indexes proof blobs by commitment because proof wire order has no semantic meaning.
-struct ProofNodes<'a>(B256Map<&'a [u8]>);
+//
+// Distinct from the crate's [`crate::proof::ProofNodes`], which maps trie paths to nodes.
+struct ProofNodeIndex<'a>(B256Map<&'a [u8]>);
 
-impl<'a> ProofNodes<'a> {
+impl<'a> ProofNodeIndex<'a> {
     // Builds the proof index once to avoid rescanning it for every boundary reference.
     fn new(proof: &'a [Bytes]) -> Self {
         Self(proof.iter().map(|node| (keccak256(node), node.as_ref())).collect())
