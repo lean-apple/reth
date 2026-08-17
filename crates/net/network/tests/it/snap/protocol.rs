@@ -14,7 +14,7 @@ use reth_network::{
     BlockDownloaderProvider,
 };
 use reth_network_api::{Direction, PeerId};
-use reth_network_p2p::{error::RequestError, snap::client::SnapClient};
+use reth_network_p2p::snap::client::{SnapClient, SnapResponse};
 use reth_provider::test_utils::MockEthProvider;
 use reth_transaction_pool::test_utils::TestPool;
 use std::{
@@ -90,13 +90,11 @@ impl Stream for InertConnection {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn eth_snap_and_third_satellite_protocol_fails_fast_on_snap_request() {
+async fn eth_snap_and_third_satellite_protocol_serves_snap_request() {
     reth_tracing::init_test_tracing();
 
-    // Snap is only wired up for the dedicated eth+snap/2 connection; a third negotiated
-    // capability forces the satellite multiplexer instead, which does not serve snap. A snap
-    // request over such a session must fail fast with a typed error rather than hang waiting for
-    // a response that will never come.
+    // A third negotiated capability selects the general multiplexer, where native snap must keep
+    // working alongside independently installed satellite protocols.
     let les_protocol = Protocol::new(Capability::new_static("les", 1), 1);
     let protocols = vec![EthVersion::Eth71.into(), Protocol::snap_2(), les_protocol.clone()];
 
@@ -127,5 +125,8 @@ async fn eth_snap_and_third_satellite_protocol_fails_fast_on_snap_request() {
     .await
     .expect("request should not hang");
 
-    assert_eq!(result.unwrap_err(), RequestError::UnsupportedCapability);
+    let SnapResponse::AccountRange(response) = result.unwrap().into_data() else {
+        panic!("expected account range response")
+    };
+    assert_eq!(response.request_id, 51);
 }
