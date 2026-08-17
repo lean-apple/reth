@@ -15,8 +15,8 @@
 //!    snap/1 trie healing,
 //! 4. rebuilds the state trie, checks its root against the header, and persists the trie tables.
 //!
-//! Everything under [`download`] and the proof verification behind it is response checking, and is
-//! independent of that sequencing; [`store`] is the only place state is written.
+//! Everything under [`download`] and the shared proof-verifying downloaders behind it is response
+//! checking, independent of that sequencing; [`store`] is the only place state is written.
 //!
 //! Snap sync is opt-in and is not reth's default sync path.
 
@@ -35,7 +35,6 @@ pub mod session;
 pub mod store;
 
 mod metrics;
-mod proof;
 
 pub use chain::{BlockRef, CanonicalChainSource, ChainError, ProviderChain};
 pub use download::{DownloadStateOutcome, StateDownloader};

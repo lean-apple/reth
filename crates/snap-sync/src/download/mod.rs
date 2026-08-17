@@ -10,7 +10,6 @@ mod bytecodes;
 mod storage;
 
 use crate::{error::SnapSyncError, store::SnapStateWriter};
-use accounts::AccountRange;
 use alloy_primitives::{
     map::{B256Map, B256Set},
     B256, KECCAK256_EMPTY, U256,
@@ -21,8 +20,8 @@ use reth_network_peers::PeerId;
 use reth_primitives_traits::Account;
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
+use reth_tasks::Runtime;
 use reth_trie::{HashedPostState, TrieAccount};
-use storage::StorageRoots;
 use tracing::debug;
 
 /// Maximum number of account hashes per storage range request.
@@ -38,7 +37,9 @@ const MAX_HASH: B256 = B256::new([0xff; 32]);
 #[derive(Debug)]
 pub struct StateDownloader<'a, C, F> {
     /// Peer client used for every snap request.
-    client: &'a C,
+    client: C,
+    /// Blocking executor used for peer-controlled proof verification.
+    runtime: Runtime,
     /// Sink for verified state.
     writer: SnapStateWriter<'a, F>,
     /// The state root every response is verified against.
@@ -49,13 +50,13 @@ pub struct StateDownloader<'a, C, F> {
 
 impl<'a, C, F> StateDownloader<'a, C, F>
 where
-    C: SnapClient + 'static,
+    C: SnapClient + Clone + Unpin + 'static,
     F: DatabaseProviderFactory,
     F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
 {
     /// Creates a downloader for the state at `root_hash`.
-    pub const fn new(client: &'a C, factory: &'a F, root_hash: B256) -> Self {
-        Self { client, writer: SnapStateWriter::new(factory), root_hash, request_id: 0 }
+    pub const fn new(client: C, factory: &'a F, root_hash: B256, runtime: Runtime) -> Self {
+        Self { client, runtime, writer: SnapStateWriter::new(factory), root_hash, request_id: 0 }
     }
 
     /// Downloads accounts, storage and bytecodes starting from `starting_hash`.
@@ -73,11 +74,16 @@ where
 
         loop {
             let (decoded, exhausted) = match self.fetch_account_range(cursor).await {
-                Ok(AccountRange::Unavailable) => {
+                Ok(reth_downloaders::snap::AccountRangeOutcome::Unavailable { peer_id }) => {
+                    debug!(target: "snap", ?peer_id, root_hash = %self.root_hash, "Snap peers no longer serve the target state");
                     return Ok(DownloadStateOutcome::Stale { resume_from: cursor })
                 }
-                Ok(AccountRange::PastTheEnd) => return Ok(DownloadStateOutcome::Done),
-                Ok(AccountRange::Verified { accounts, exhausted }) => (accounts, exhausted),
+                Ok(reth_downloaders::snap::AccountRangeOutcome::Verified(range)) => {
+                    if range.accounts.is_empty() {
+                        return Ok(DownloadStateOutcome::Done)
+                    }
+                    (range.accounts, !range.has_more)
+                }
                 Err(SnapSyncError::NoSnapPeers) => {
                     return Ok(DownloadStateOutcome::WaitingForPeers { resume_from: cursor })
                 }
@@ -124,14 +130,7 @@ where
         &mut self,
         batch: &[(B256, TrieAccount)],
     ) -> Result<bool, SnapSyncError> {
-        let account_hashes: Vec<B256> = batch.iter().map(|(hash, _)| *hash).collect();
-        let storage_roots = StorageRoots(
-            batch.iter().map(|(hash, account)| (*hash, account.storage_root)).collect(),
-        );
-
-        let Some(storages) = self.collect_storage(&account_hashes, &storage_roots).await? else {
-            return Ok(false)
-        };
+        let Some(storages) = self.collect_storage(batch).await? else { return Ok(false) };
 
         let code_hashes: B256Set = batch
             .iter()
@@ -197,15 +196,23 @@ fn next_hash(hash: B256) -> Option<B256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_downloaders::snap::AccountRangeOutcome;
     use reth_eth_wire_types::snap::{
-        GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage,
+        AccountData, AccountRangeMessage, GetAccountRangeMessage, GetByteCodesMessage,
+        GetStorageRangesMessage,
     };
     use reth_network_p2p::{
         download::DownloadClient, error::PeerRequestResult, priority::Priority,
         snap::client::SnapResponse,
     };
+    use reth_network_peers::{PeerId, WithPeerId};
     use reth_provider::test_utils::create_test_provider_factory;
-    use std::future::{ready, Ready};
+    use reth_trie_common::{HashBuilder, Nibbles, EMPTY_ROOT_HASH};
+    use std::{
+        collections::VecDeque,
+        future::{ready, Ready},
+        sync::{Arc, Mutex},
+    };
 
     fn b256(value: u64) -> B256 {
         B256::left_padding_from(&value.to_be_bytes())
@@ -213,7 +220,7 @@ mod tests {
 
     /// A client standing in for a network with no `snap/2` peer connected, which fails every snap
     /// request outright rather than queueing it.
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     struct NoSnapPeers;
 
     impl DownloadClient for NoSnapPeers {
@@ -270,6 +277,66 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct AccountRangeClient {
+        responses: Arc<Mutex<VecDeque<PeerRequestResult<SnapResponse>>>>,
+        reported: Arc<Mutex<Vec<PeerId>>>,
+    }
+
+    impl DownloadClient for AccountRangeClient {
+        fn report_bad_message(&self, peer_id: PeerId) {
+            self.reported.lock().unwrap().push(peer_id);
+        }
+
+        fn num_connected_peers(&self) -> usize {
+            3
+        }
+    }
+
+    impl SnapClient for AccountRangeClient {
+        type Output = Ready<PeerRequestResult<SnapResponse>>;
+
+        fn get_account_range_with_priority(
+            &self,
+            _request: GetAccountRangeMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(self.responses.lock().unwrap().pop_front().expect("response available"))
+        }
+
+        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+            self.get_storage_ranges_with_priority(request, Priority::Normal)
+        }
+
+        fn get_storage_ranges_with_priority(
+            &self,
+            _request: GetStorageRangesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_byte_codes_with_priority(
+            &self,
+            _request: GetByteCodesMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+
+        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+            self.get_byte_codes_with_priority(request, Priority::Normal)
+        }
+
+        fn get_block_access_lists_with_priority(
+            &self,
+            _request: reth_eth_wire_types::snap::GetBlockAccessListsMessage,
+            _priority: Priority,
+        ) -> Self::Output {
+            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
+        }
+    }
+
     #[test]
     fn next_hash_steps_and_stops_at_the_end() {
         assert_eq!(next_hash(B256::ZERO), Some(b256(1)));
@@ -278,14 +345,59 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_peer_set_pauses_the_download_rather_than_ending_it() {
-        let client = NoSnapPeers;
         let factory = create_test_provider_factory();
-        let mut downloader = StateDownloader::new(&client, &factory, b256(0xabc));
+        let mut downloader =
+            StateDownloader::new(NoSnapPeers, &factory, b256(0xabc), Runtime::test());
 
         // A session that starts before any snap peer connects would otherwise exhaust its retry
         // budget instantly and report a failed sync.
         let outcome = downloader.run(b256(7)).await.unwrap();
 
         assert_eq!(outcome, DownloadStateOutcome::WaitingForPeers { resume_from: b256(7) });
+    }
+
+    #[tokio::test]
+    async fn unavailable_account_peers_do_not_stale_the_target_early() {
+        let account_hash = b256(1);
+        let account = TrieAccount {
+            nonce: 1,
+            balance: U256::from(2),
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: KECCAK256_EMPTY,
+        };
+        let mut builder = HashBuilder::default();
+        builder.add_leaf(Nibbles::unpack(account_hash), &alloy_rlp::encode(account));
+        let root_hash = builder.root();
+        let peers = [PeerId::random(), PeerId::random(), PeerId::random()];
+        let responses = [
+            AccountRangeMessage { request_id: 1, accounts: Vec::new(), proof: Vec::new() },
+            AccountRangeMessage { request_id: 2, accounts: Vec::new(), proof: Vec::new() },
+            AccountRangeMessage {
+                request_id: 3,
+                accounts: vec![AccountData::from_trie_account(account_hash, &account)],
+                proof: Vec::new(),
+            },
+        ]
+        .into_iter()
+        .zip(peers)
+        .map(|(response, peer_id)| {
+            Ok(WithPeerId::new(peer_id, SnapResponse::AccountRange(response)))
+        })
+        .collect();
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let client = AccountRangeClient { responses: Arc::new(Mutex::new(responses)), reported };
+        let factory = create_test_provider_factory();
+        let mut downloader = StateDownloader::new(client, &factory, root_hash, Runtime::test());
+
+        let outcome = downloader.fetch_account_range(B256::ZERO).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            AccountRangeOutcome::Verified(reth_downloaders::snap::VerifiedAccountRange {
+                accounts: vec![(account_hash, account)],
+                has_more: false,
+            })
+        );
+        assert!(downloader.client.reported.lock().unwrap().is_empty());
     }
 }

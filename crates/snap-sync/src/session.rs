@@ -28,6 +28,7 @@ use reth_storage_api::{
     AccountExtReader, BalStoreHandle, DBProvider, StageCheckpointWriter, StateWriter,
     StorageSettingsCache, TrieWriter,
 };
+use reth_tasks::Runtime;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info};
 
@@ -36,6 +37,8 @@ use tracing::{debug, info};
 pub struct SnapSyncSession<C, F, H> {
     /// Peer client for every snap request.
     client: C,
+    /// Blocking executor used for proof verification.
+    runtime: Runtime,
     /// Provider factory the state is assembled into.
     factory: F,
     /// Where canonicality comes from.
@@ -59,16 +62,23 @@ pub struct SnapSyncSession<C, F, H> {
 
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
-    C: SnapClient + 'static,
+    C: SnapClient + Clone + Unpin + 'static,
     F: DatabaseProviderFactory,
     F::Provider: AccountExtReader + DBProvider,
     F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter + TrieWriter + StorageSettingsCache,
     H: CanonicalChainSource,
 {
     /// Creates an idle session.
-    pub fn new(client: C, factory: F, chain: H, bal_store: BalStoreHandle) -> Self {
+    pub fn new(
+        client: C,
+        factory: F,
+        chain: H,
+        bal_store: BalStoreHandle,
+        runtime: Runtime,
+    ) -> Self {
         Self {
             client,
+            runtime,
             factory,
             chain,
             bal_store,
@@ -157,7 +167,12 @@ where
             return Err(SnapSyncError::Network("session is not downloading".into()))
         };
 
-        let mut downloader = StateDownloader::new(&self.client, &self.factory, target.state_root);
+        let mut downloader = StateDownloader::new(
+            self.client.clone(),
+            &self.factory,
+            target.state_root,
+            self.runtime.clone(),
+        );
         match downloader.run(covered_end).await? {
             DownloadStateOutcome::Done => {
                 self.state = SyncState::Healing { target, applied: target };
@@ -567,7 +582,7 @@ mod tests {
     use reth_provider::test_utils::create_test_provider_factory;
     use std::future::{ready, Ready};
 
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     struct NoSnapPeers;
 
     impl DownloadClient for NoSnapPeers {
@@ -703,6 +718,7 @@ mod tests {
 
         let mut session = SnapSyncSession {
             client: (),
+            runtime: Runtime::test(),
             factory,
             chain: (),
             bal_store: BalStoreHandle::noop(),
@@ -722,8 +738,13 @@ mod tests {
         let factory = create_test_provider_factory();
         factory.set_storage_settings_cache(StorageSettings::v2());
         let head = block(0, true);
-        let mut session =
-            SnapSyncSession::new(NoSnapPeers, factory, FixedChain(head), BalStoreHandle::noop());
+        let mut session = SnapSyncSession::new(
+            NoSnapPeers,
+            factory,
+            FixedChain(head),
+            BalStoreHandle::noop(),
+            Runtime::test(),
+        );
 
         assert_eq!(session.run_until_blocked().await.unwrap(), SessionRunOutcome::WaitingForPeers);
         assert!(matches!(session.state, SyncState::Downloading { target, .. } if target == head));

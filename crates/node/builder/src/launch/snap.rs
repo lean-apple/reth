@@ -58,7 +58,7 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
 
     fn spawn_snap(&mut self, target: PipelineTarget) -> Result<(), PipelineError>
     where
-        C: SnapClient + Clone + 'static,
+        C: SnapClient + Clone + Unpin + 'static,
     {
         let hash = target.sync_target().ok_or_else(|| fatal("snap sync cannot unwind"))?;
         let chain = Arc::new(
@@ -68,11 +68,13 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
         let client = self.client.clone();
         let factory = self.factory.clone();
         let bal_store = self.bal_store.clone();
+        let runtime = self.runtime.clone();
         let (tx, rx) = oneshot::channel();
         let (head_tx, head_rx) = watch::channel(None);
 
         self.runtime.spawn_critical_blocking_task("snap state sync", async move {
-            let result = run_snap_session(client, factory, bal_store, chain, head_rx).await;
+            let result =
+                run_snap_session(client, factory, bal_store, chain, runtime, head_rx).await;
             let _ = tx.send(result);
         });
         self.snap = Some(SnapTask { result: rx, head: head_tx });
@@ -81,7 +83,7 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
 
     fn on_header_event(&mut self, event: BackfillEvent) -> Option<BackfillEvent>
     where
-        C: SnapClient + Clone + 'static,
+        C: SnapClient + Clone + Unpin + 'static,
     {
         match event {
             BackfillEvent::Started(target) => {
@@ -136,7 +138,7 @@ impl<N: ProviderNodeTypes, C> SnapBootstrapSync<N, C> {
 impl<N, C> BackfillSync for SnapBootstrapSync<N, C>
 where
     N: ProviderNodeTypes,
-    C: SnapClient + Clone + 'static,
+    C: SnapClient + Clone + Unpin + 'static,
 {
     fn on_action(&mut self, action: BackfillAction) {
         if self.bootstrapped {
@@ -177,17 +179,18 @@ async fn run_snap_session<N, C>(
     factory: ProviderFactory<N>,
     bal_store: BalStoreHandle,
     chain: Arc<ProviderChain<ProviderFactory<N>>>,
+    runtime: Runtime,
     mut head: watch::Receiver<Option<alloy_primitives::B256>>,
 ) -> Result<ControlFlow, PipelineError>
 where
     N: ProviderNodeTypes,
-    C: SnapClient + 'static,
+    C: SnapClient + Clone + Unpin + 'static,
 {
     let head_updated = Arc::new(Notify::new());
     let session_head_updated = Arc::clone(&head_updated);
     let session_chain = Arc::clone(&chain);
     let session = async move {
-        let mut session = SnapSyncSession::new(client, factory, session_chain, bal_store);
+        let mut session = SnapSyncSession::new(client, factory, session_chain, bal_store, runtime);
 
         loop {
             match session.run_until_blocked().await.map_err(snap_error)? {

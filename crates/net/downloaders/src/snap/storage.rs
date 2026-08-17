@@ -10,6 +10,7 @@ use reth_network_p2p::{
     snap::client::{SnapClient, SnapResponse},
 };
 use reth_network_peers::PeerId;
+use reth_tasks::Runtime;
 use reth_trie_common::{range_proof::verify_range_proof, TrieAccount};
 use std::{
     pin::Pin,
@@ -26,18 +27,22 @@ const MAX_HASH: B256 = B256::new([0xff; B256::len_bytes()]);
 #[derive(Debug)]
 pub struct StorageRangeDownloader<C: SnapClient> {
     client: C,
+    runtime: Runtime,
     request: GetStorageRangesMessage,
     storage_roots: Vec<B256>,
     fut: C::Output,
+    verification: Option<StorageVerificationTask>,
     retries: u8,
 }
 
 impl<C: SnapClient> StorageRangeDownloader<C> {
-    /// Validates the request against `accounts` and submits it at normal priority.
+    /// Validates the request against `accounts`, submits it at normal priority, and uses `runtime`
+    /// for proof verification.
     pub fn new(
         client: C,
         request: GetStorageRangesMessage,
         accounts: &[(B256, TrieAccount)],
+        runtime: Runtime,
     ) -> Result<Self, InvalidStorageRangeRequest> {
         let origin = request.starting_hash.unwrap_or(B256::ZERO);
         let limit = request.limit_hash.unwrap_or(MAX_HASH);
@@ -69,10 +74,10 @@ impl<C: SnapClient> StorageRangeDownloader<C> {
         }
 
         let fut = client.get_storage_ranges(request.clone());
-        Ok(Self { client, request, storage_roots, fut, retries: 0 })
+        Ok(Self { client, runtime, request, storage_roots, fut, verification: None, retries: 0 })
     }
 
-    /// Reissues the request at high priority while retry budget remains.
+    // Reissues the request at high priority while retry budget remains.
     fn retry(&mut self) -> bool {
         if self.retries >= MAX_RETRIES {
             return false
@@ -83,7 +88,43 @@ impl<C: SnapClient> StorageRangeDownloader<C> {
         true
     }
 
-    /// Decodes and authenticates every positional range in a storage response.
+    // Keep peer attribution while decoding and proof work run off the async worker.
+    fn start_verification(&mut self, peer_id: PeerId, response: SnapResponse) {
+        let verifier = StorageProofVerifier {
+            request: self.request.clone(),
+            storage_roots: self.storage_roots.clone(),
+        };
+        let fut = self.runtime.spawn_blocking(move || verifier.verify_response(peer_id, response));
+        self.verification = Some(StorageVerificationTask { peer_id, fut });
+    }
+
+    // Retry only after an invalid proof has been attributed to its responder.
+    fn poll_verification(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<StorageRangeOutcome>, RequestError>> {
+        let verification = self.verification.as_mut().expect("verification task is present");
+        let result = ready!(verification.fut.poll_unpin(cx));
+        let peer_id = verification.peer_id;
+        self.verification = None;
+
+        match result {
+            Ok(Ok(outcome)) => Poll::Ready(Ok(Some(outcome))),
+            Ok(Err(error)) => {
+                tracing::debug!(target: "downloaders::snap", ?peer_id, %error, "Invalid storage ranges response");
+                self.client.report_bad_message(peer_id);
+                Poll::Ready(self.retry().then_some(None).ok_or(error))
+            }
+            Err(error) => {
+                tracing::debug!(target: "downloaders::snap", %error, "Storage range verification task failed");
+                Poll::Ready(Err(RequestError::ChannelClosed))
+            }
+        }
+    }
+}
+
+impl StorageProofVerifier {
+    // Decodes and authenticates every positional range in a storage response.
     fn verify_response(
         &self,
         peer_id: PeerId,
@@ -174,7 +215,7 @@ impl<C: SnapClient> StorageRangeDownloader<C> {
         Ok(StorageRangeOutcome::Verified(VerifiedStorageRanges { ranges, continuation }))
     }
 
-    /// Validates slot order and decodes the RLP storage values for one account.
+    // Validates slot order and decodes the RLP storage values for one account.
     fn decode_slots(
         account_hash: B256,
         origin: B256,
@@ -226,24 +267,18 @@ where
         let this = self.get_mut();
 
         loop {
+            if this.verification.is_some() {
+                match ready!(this.poll_verification(cx)) {
+                    Ok(Some(outcome)) => return Poll::Ready(Ok(outcome)),
+                    Ok(None) => {}
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
+            }
+
             match ready!(this.fut.poll_unpin(cx)) {
                 Ok(response) => {
                     let (peer_id, response) = response.split();
-                    match this.verify_response(peer_id, response) {
-                        Ok(outcome) => return Poll::Ready(Ok(outcome)),
-                        Err(error) => {
-                            tracing::debug!(
-                                target: "downloaders::snap",
-                                ?peer_id,
-                                %error,
-                                "Invalid storage ranges response"
-                            );
-                            this.client.report_bad_message(peer_id);
-                            if !this.retry() {
-                                return Poll::Ready(Err(error))
-                            }
-                        }
-                    }
+                    this.start_verification(peer_id, response);
                 }
                 Err(error) if error.is_retryable() || error == RequestError::BadResponse => {
                     tracing::debug!(
@@ -259,6 +294,20 @@ where
             }
         }
     }
+}
+
+// Owns the request context moved to the blocking verifier.
+#[derive(Debug)]
+struct StorageProofVerifier {
+    request: GetStorageRangesMessage,
+    storage_roots: Vec<B256>,
+}
+
+// Couples blocking proof work with its responder so failures remain attributable.
+#[derive(Debug)]
+struct StorageVerificationTask {
+    peer_id: PeerId,
+    fut: tokio::task::JoinHandle<Result<StorageRangeOutcome, RequestError>>,
 }
 
 /// The result of an authenticated storage-ranges request.
@@ -499,6 +548,14 @@ mod tests {
         slots.iter().map(|(hash, value)| StorageData::from_value(*hash, *value)).collect()
     }
 
+    fn downloader(
+        client: Arc<TestSnapClient>,
+        request: GetStorageRangesMessage,
+        accounts: &[(B256, TrieAccount)],
+    ) -> Result<StorageRangeDownloader<Arc<TestSnapClient>>, InvalidStorageRangeRequest> {
+        StorageRangeDownloader::new(client, request, accounts, Runtime::test())
+    }
+
     #[tokio::test]
     async fn verifies_complete_storage_for_multiple_accounts() {
         let first_slots = vec![(key(1), U256::from(1)), (key(2), U256::from(2))];
@@ -515,10 +572,7 @@ mod tests {
         let client = Arc::new(TestSnapClient::new([response]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert_eq!(
             outcome,
@@ -545,10 +599,7 @@ mod tests {
         )]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert_eq!(
             outcome,
@@ -578,10 +629,7 @@ mod tests {
         )]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         let StorageRangeOutcome::Verified(verified) = outcome else { panic!("verified response") };
         assert_eq!(
@@ -603,10 +651,7 @@ mod tests {
             message(vec![storage_data(&slots[..2])], proof),
         )]));
 
-        let outcome = StorageRangeDownloader::new(Arc::clone(&client), request, &accounts)
-            .unwrap()
-            .await
-            .unwrap();
+        let outcome = downloader(Arc::clone(&client), request, &accounts).unwrap().await.unwrap();
 
         assert_eq!(
             outcome,
@@ -630,10 +675,7 @@ mod tests {
         )]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert_eq!(
             outcome,
@@ -652,10 +694,7 @@ mod tests {
             Arc::new(TestSnapClient::new([response(peer_id, message(Vec::new(), Vec::new()))]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert_eq!(outcome, StorageRangeOutcome::Unavailable { peer_id });
         assert!(client.reported.lock().unwrap().is_empty());
@@ -679,10 +718,7 @@ mod tests {
         let client = Arc::new(TestSnapClient::new([bad, good]));
 
         let outcome =
-            StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
-                .unwrap()
-                .await
-                .unwrap();
+            downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert!(matches!(outcome, StorageRangeOutcome::Verified(_)));
         assert_eq!(*client.reported.lock().unwrap(), [bad_peer]);
@@ -700,7 +736,7 @@ mod tests {
             std::iter::repeat_with(|| response(peer_id, invalid.clone())).take(attempts),
         ));
 
-        let error = StorageRangeDownloader::new(Arc::clone(&client), request(&accounts), &accounts)
+        let error = downloader(Arc::clone(&client), request(&accounts), &accounts)
             .unwrap()
             .await
             .unwrap_err();
@@ -715,32 +751,20 @@ mod tests {
         let first = StorageData::from_value(key(1), U256::from(1));
         let second = StorageData::from_value(key(2), U256::from(2));
 
-        assert!(StorageRangeDownloader::<Arc<TestSnapClient>>::decode_slots(
+        assert!(StorageProofVerifier::decode_slots(
             account_hash,
             key(1),
             &[first.clone(), second.clone()],
         )
         .is_ok());
-        assert!(StorageRangeDownloader::<Arc<TestSnapClient>>::decode_slots(
-            account_hash,
-            key(1),
-            &[second, first.clone()],
-        )
-        .is_err());
-        assert!(StorageRangeDownloader::<Arc<TestSnapClient>>::decode_slots(
-            account_hash,
-            key(2),
-            &[first],
-        )
-        .is_err());
+        assert!(
+            StorageProofVerifier::decode_slots(account_hash, key(1), &[second, first.clone()],)
+                .is_err()
+        );
+        assert!(StorageProofVerifier::decode_slots(account_hash, key(2), &[first],).is_err());
 
         let malformed = StorageData { hash: key(2), data: Bytes::from_static(&[0x81]) };
-        assert!(StorageRangeDownloader::<Arc<TestSnapClient>>::decode_slots(
-            account_hash,
-            key(1),
-            &[malformed],
-        )
-        .is_err());
+        assert!(StorageProofVerifier::decode_slots(account_hash, key(1), &[malformed],).is_err());
     }
 
     #[test]
@@ -750,12 +774,13 @@ mod tests {
         let accounts = vec![account(key(10), storage_root(&committed))];
         let peer_id = PeerId::random();
         let message = message(vec![storage_data(&served)], Vec::new());
-        let client = Arc::new(TestSnapClient::new([response(peer_id, message.clone())]));
-        let downloader =
-            StorageRangeDownloader::new(client, request(&accounts), &accounts).unwrap();
+        let verifier = StorageProofVerifier {
+            request: request(&accounts),
+            storage_roots: vec![accounts[0].1.storage_root],
+        };
 
         assert_eq!(
-            downloader.verify_response(peer_id, SnapResponse::StorageRanges(message)).unwrap_err(),
+            verifier.verify_response(peer_id, SnapResponse::StorageRanges(message)).unwrap_err(),
             RequestError::BadResponse
         );
     }
@@ -768,7 +793,7 @@ mod tests {
         let mut empty = request(&accounts);
         empty.account_hashes.clear();
         assert!(matches!(
-            StorageRangeDownloader::new(Arc::clone(&client), empty, &[]),
+            downloader(Arc::clone(&client), empty, &[]),
             Err(InvalidStorageRangeRequest::NoAccounts)
         ));
 
@@ -776,14 +801,14 @@ mod tests {
         reversed.starting_hash = key(2).into();
         reversed.limit_hash = key(1).into();
         assert!(matches!(
-            StorageRangeDownloader::new(Arc::clone(&client), reversed, &accounts),
+            downloader(Arc::clone(&client), reversed, &accounts),
             Err(InvalidStorageRangeRequest::ReversedBounds { .. })
         ));
 
         let mut mismatched = request(&accounts);
         mismatched.account_hashes[0] = key(11);
         assert!(matches!(
-            StorageRangeDownloader::new(client, mismatched, &accounts),
+            downloader(client, mismatched, &accounts),
             Err(InvalidStorageRangeRequest::AccountMismatch { .. })
         ));
     }

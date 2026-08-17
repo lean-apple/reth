@@ -10252,17 +10252,17 @@ dependencies = [
 
 [[package]]
 name = "reth-snap-sync"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
- "alloy-trie",
  "metrics",
  "parking_lot",
  "reth-db-api",
+ "reth-downloaders",
  "reth-eth-wire-types",
  "reth-metrics",
  "reth-network-p2p",
@@ -10271,6 +10271,7 @@ dependencies = [
  "reth-provider",
  "reth-stages-types",
  "reth-storage-api",
+ "reth-tasks",
  "reth-trie",
  "reth-trie-common",
  "reth-trie-db",

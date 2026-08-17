@@ -18,7 +18,7 @@ use reth_storage_api::{DBProvider, StateWriter};
 
 impl<C, F> StateDownloader<'_, C, F>
 where
-    C: SnapClient + 'static,
+    C: SnapClient + Clone + Unpin + 'static,
     F: DatabaseProviderFactory,
     F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter,
 {

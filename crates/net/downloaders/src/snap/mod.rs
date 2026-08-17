@@ -10,13 +10,6 @@ pub use storage::{
     StorageRangeOutcome, VerifiedStorageRange, VerifiedStorageRanges,
 };
 
-mod storage;
-
-pub use storage::{
-    InvalidStorageRangeRequest, StorageRangeContinuation, StorageRangeDownloader,
-    StorageRangeOutcome, VerifiedStorageRange, VerifiedStorageRanges,
-};
-
 use alloy_primitives::B256;
 use futures::{Future, FutureExt};
 use reth_eth_wire_types::snap::{AccountRangeMessage, GetAccountRangeMessage};
