@@ -1,6 +1,6 @@
 //! Engine node related functionality.
 
-use super::snap::{should_snap_bootstrap, SnapBootstrapSync};
+use super::snap::{SnapBootstrapConditions, SnapBootstrapSync};
 use crate::{
     common::{Attached, LaunchContextWith, WithConfigs},
     hooks::NodeHooks,
@@ -170,14 +170,15 @@ impl EngineNodeLauncher {
             .map(|checkpoint| checkpoint.block_number)
             .unwrap_or_default();
         let genesis = ctx.chain_spec().genesis().number.unwrap_or_default();
-        let snap_bootstrap = should_snap_bootstrap(
-            node_config.network.snap,
-            ctx.chain_spec().is_optimism(),
-            ctx.provider_factory().cached_storage_settings().use_hashed_state(),
+        let snap_bootstrap = SnapBootstrapConditions {
+            enabled: node_config.network.snap,
+            is_optimism: ctx.chain_spec().is_optimism(),
+            uses_hashed_state: ctx.provider_factory().cached_storage_settings().use_hashed_state(),
             finish,
             genesis,
-            interrupted_snap.is_some(),
-        );
+            interrupted: interrupted_snap.is_some(),
+        }
+        .met();
 
         // We always assume that node is syncing after a restart
         network_handle.update_sync_state(SyncState::Syncing);

@@ -14,6 +14,12 @@ use std::{
 };
 use tokio::sync::{oneshot, watch, Notify};
 
+/// How long a session waits before retrying once no connected peer advertises `snap/2`.
+///
+/// Peers arrive from discovery rather than from anything the session does, so this only paces
+/// the retry; nothing already downloaded is lost while it waits.
+const SNAP_PEER_WAIT: Duration = Duration::from_secs(1);
+
 /// Adds an optional snap bootstrap before regular pipeline backfill.
 #[derive(Debug)]
 pub(crate) struct SnapBootstrapSync<N: ProviderNodeTypes, C> {
@@ -162,16 +168,34 @@ where
     }
 }
 
-/// Returns whether this database should use snap for its next backfill.
-pub(crate) const fn should_snap_bootstrap(
-    enabled: bool,
-    is_optimism: bool,
-    uses_hashed_state: bool,
-    finish: u64,
-    genesis: u64,
-    interrupted: bool,
-) -> bool {
-    enabled && !is_optimism && uses_hashed_state && (finish <= genesis || interrupted)
+/// What decides whether this database should use snap for its next backfill.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnapBootstrapConditions {
+    /// Whether `--snap` was passed.
+    pub(crate) enabled: bool,
+    /// Snap assembles Ethereum state only.
+    pub(crate) is_optimism: bool,
+    /// Snap responses are hashed with no preimages, so only the v2 layout can hold them.
+    pub(crate) uses_hashed_state: bool,
+    /// Height the pipeline has finished.
+    pub(crate) finish: u64,
+    /// Height the chain starts at.
+    pub(crate) genesis: u64,
+    /// Whether a previous generation was left unverified on disk.
+    pub(crate) interrupted: bool,
+}
+
+impl SnapBootstrapConditions {
+    /// Returns whether this database should use snap for its next backfill.
+    ///
+    /// Only a database still at genesis, or one already part-way through a generation, qualifies:
+    /// a node that has executed blocks would have its state wiped for nothing.
+    pub(crate) const fn met(self) -> bool {
+        self.enabled &&
+            !self.is_optimism &&
+            self.uses_hashed_state &&
+            (self.finish <= self.genesis || self.interrupted)
+    }
 }
 
 async fn run_snap_session<N, C>(
@@ -199,7 +223,7 @@ where
                     return Ok(ControlFlow::Continue { block_number: at.number })
                 }
                 SessionRunOutcome::WaitingForPeers => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(SNAP_PEER_WAIT).await;
                 }
                 SessionRunOutcome::WaitingForTarget => session_head_updated.notified().await,
             }
@@ -240,15 +264,25 @@ struct SnapTask {
 
 #[cfg(test)]
 mod tests {
-    use super::should_snap_bootstrap;
+    use super::SnapBootstrapConditions;
+
+    /// A fresh Ethereum v2 database with snap enabled, which every case below varies from.
+    const FRESH: SnapBootstrapConditions = SnapBootstrapConditions {
+        enabled: true,
+        is_optimism: false,
+        uses_hashed_state: true,
+        finish: 0,
+        genesis: 0,
+        interrupted: false,
+    };
 
     #[test]
     fn snap_bootstrap_is_limited_to_fresh_or_interrupted_hashed_state_databases() {
-        assert!(should_snap_bootstrap(true, false, true, 0, 0, false));
-        assert!(should_snap_bootstrap(true, false, true, 100, 0, true));
-        assert!(!should_snap_bootstrap(true, false, true, 100, 0, false));
-        assert!(!should_snap_bootstrap(true, false, false, 0, 0, false));
-        assert!(!should_snap_bootstrap(true, true, true, 0, 0, false));
-        assert!(!should_snap_bootstrap(false, false, true, 0, 0, false));
+        assert!(FRESH.met());
+        assert!(SnapBootstrapConditions { finish: 100, interrupted: true, ..FRESH }.met());
+        assert!(!SnapBootstrapConditions { finish: 100, ..FRESH }.met());
+        assert!(!SnapBootstrapConditions { uses_hashed_state: false, ..FRESH }.met());
+        assert!(!SnapBootstrapConditions { is_optimism: true, ..FRESH }.met());
+        assert!(!SnapBootstrapConditions { enabled: false, ..FRESH }.met());
     }
 }
