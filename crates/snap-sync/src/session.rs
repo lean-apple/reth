@@ -606,20 +606,12 @@ mod tests {
             ready(Err(RequestError::UnsupportedCapability))
         }
 
-        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
-            self.get_storage_ranges_with_priority(request, Priority::Normal)
-        }
-
         fn get_storage_ranges_with_priority(
             &self,
             _request: GetStorageRangesMessage,
             _priority: Priority,
         ) -> Self::Output {
             ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
-            self.get_byte_codes_with_priority(request, Priority::Normal)
         }
 
         fn get_byte_codes_with_priority(

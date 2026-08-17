@@ -1,11 +1,11 @@
 //! Account-range orchestration for the state downloader.
 
-use super::{StateDownloader, MAX_HASH};
+use super::StateDownloader;
 use crate::{error::SnapSyncError, MAX_REQUEST_ATTEMPTS, SNAP_RESPONSE_BYTES_LIMIT};
 use alloy_primitives::B256;
 use reth_db_api::transaction::DbTxMut;
 use reth_downloaders::snap::{AccountRangeDownloader, AccountRangeOutcome};
-use reth_eth_wire_types::snap::GetAccountRangeMessage;
+use reth_eth_wire_types::snap::{GetAccountRangeMessage, MAX_HASH};
 use reth_network_p2p::{error::RequestError, snap::client::SnapClient};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};

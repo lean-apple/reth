@@ -1,13 +1,13 @@
 //! Storage-range orchestration for account micro-batches.
 
-use super::{StateDownloader, MAX_HASH};
+use super::StateDownloader;
 use crate::{error::SnapSyncError, MAX_REQUEST_ATTEMPTS, SNAP_RESPONSE_BYTES_LIMIT};
 use alloy_primitives::{map::B256Map, B256};
 use reth_db_api::transaction::DbTxMut;
 use reth_downloaders::snap::{
     StorageRangeContinuation, StorageRangeDownloader, StorageRangeOutcome, VerifiedStorageRanges,
 };
-use reth_eth_wire_types::snap::GetStorageRangesMessage;
+use reth_eth_wire_types::snap::{GetStorageRangesMessage, RangeBound};
 use reth_network_p2p::{error::RequestError, snap::client::SnapClient};
 use reth_provider::DatabaseProviderFactory;
 use reth_storage_api::{DBProvider, StateWriter};
@@ -82,7 +82,9 @@ where
                 root_hash: self.root_hash,
                 account_hashes: accounts.iter().map(|(hash, _)| *hash).collect(),
                 starting_hash: starting_hash.into(),
-                limit_hash: MAX_HASH.into(),
+                // Every account's storage trie is wanted whole, which snap/2 states as an
+                // unbounded limit rather than a 32-byte maximum.
+                limit_hash: RangeBound::default(),
                 response_bytes: SNAP_RESPONSE_BYTES_LIMIT,
             };
             let downloader = StorageRangeDownloader::new(

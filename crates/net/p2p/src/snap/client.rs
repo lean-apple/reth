@@ -77,7 +77,9 @@ pub trait SnapClient: DownloadClient {
 
     /// Sends the storage ranges request to the p2p network and returns the storage ranges
     /// response received from a peer.
-    fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output;
+    fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
+        self.get_storage_ranges_with_priority(request, Priority::Normal)
+    }
 
     /// Sends the storage ranges request to the p2p network with priority set and returns
     /// the storage ranges response received from a peer.
@@ -89,7 +91,9 @@ pub trait SnapClient: DownloadClient {
 
     /// Sends the byte codes request to the p2p network and returns the byte codes
     /// response received from a peer.
-    fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output;
+    fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
+        self.get_byte_codes_with_priority(request, Priority::Normal)
+    }
 
     /// Sends the byte codes request to the p2p network with priority set and returns
     /// the byte codes response received from a peer.
@@ -135,22 +139,12 @@ where
         unsupported()
     }
 
-    /// Fails the storage ranges request as unsupported.
-    fn get_storage_ranges(&self, _request: GetStorageRangesMessage) -> Self::Output {
-        unsupported()
-    }
-
     /// Fails the prioritized storage ranges request as unsupported.
     fn get_storage_ranges_with_priority(
         &self,
         _request: GetStorageRangesMessage,
         _priority: Priority,
     ) -> Self::Output {
-        unsupported()
-    }
-
-    /// Fails the bytecode request as unsupported.
-    fn get_byte_codes(&self, _request: GetByteCodesMessage) -> Self::Output {
         unsupported()
     }
 

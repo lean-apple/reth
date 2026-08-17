@@ -13,7 +13,7 @@ use reth_eth_wire::{
     snap::{
         AccountData, AccountRangeMessage, BlockAccessListsMessage, ByteCodesMessage,
         GetAccountRangeMessage, GetStorageRangesMessage, SnapProtocolMessage, StorageData,
-        StorageRangesMessage,
+        StorageRangesMessage, MAX_HASH,
     },
     BlockAccessLists, BlockBodies, BlockHeaders, Cells, EthNetworkPrimitives, GetBlockAccessLists,
     GetBlockBodies, GetBlockHeaders, GetCells, GetNodeData, GetReceipts, GetReceipts70,
@@ -589,12 +589,9 @@ where
                 break
             }
             let (origin, limit) = if i == 0 {
-                (
-                    req.starting_hash.unwrap_or(B256::ZERO),
-                    req.limit_hash.unwrap_or(B256::repeat_byte(0xff)),
-                )
+                (req.starting_hash.unwrap_or(B256::ZERO), req.limit_hash.unwrap_or(MAX_HASH))
             } else {
-                (B256::ZERO, B256::repeat_byte(0xff))
+                (B256::ZERO, MAX_HASH)
             };
             let Some(RangeResponse { items: account_slots, end }) =
                 state.storage_range(hashed_address, origin, limit, remaining_bytes)?

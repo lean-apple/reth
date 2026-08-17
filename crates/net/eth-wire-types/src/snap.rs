@@ -12,6 +12,12 @@ use alloy_rlp::{BufMut, Decodable, Encodable, RlpDecodable, RlpEncodable};
 use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH};
 use reth_codecs_derive::add_arbitrary_tests;
 
+/// Upper bound of the hashed key space, and the limit an unbounded range request carries.
+///
+/// A snap request's `limit_hash` is inclusive, so this is the value that asks a server for
+/// everything to the end of a trie.
+pub const MAX_HASH: B256 = B256::repeat_byte(0xff);
+
 /// Supported SNAP protocol versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

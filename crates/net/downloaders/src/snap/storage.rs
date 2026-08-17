@@ -3,7 +3,7 @@
 use super::MAX_RETRIES;
 use alloy_primitives::{B256, U256};
 use futures::{Future, FutureExt};
-use reth_eth_wire_types::snap::{GetStorageRangesMessage, StorageData};
+use reth_eth_wire_types::snap::{GetStorageRangesMessage, StorageData, MAX_HASH};
 use reth_network_p2p::{
     error::RequestError,
     priority::Priority,
@@ -16,8 +16,6 @@ use std::{
     pin::Pin,
     task::{ready, Context, Poll},
 };
-
-const MAX_HASH: B256 = B256::new([0xff; B256::len_bytes()]);
 
 /// Downloads and verifies storage ranges for accounts authenticated by an account-range response.
 ///
@@ -457,20 +455,12 @@ mod tests {
             ready(Err(RequestError::UnsupportedCapability))
         }
 
-        fn get_storage_ranges(&self, _request: GetStorageRangesMessage) -> Self::Output {
-            self.next(Priority::Normal)
-        }
-
         fn get_storage_ranges_with_priority(
             &self,
             _request: GetStorageRangesMessage,
             priority: Priority,
         ) -> Self::Output {
             self.next(priority)
-        }
-
-        fn get_byte_codes(&self, _request: GetByteCodesMessage) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
         }
 
         fn get_byte_codes_with_priority(

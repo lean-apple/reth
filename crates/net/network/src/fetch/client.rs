@@ -190,22 +190,12 @@ impl<N: NetworkPrimitives> SnapClient for FetchClient<N> {
     }
 
     /// Sends a `GetStorageRanges` (`snap/2`) request to an available peer.
-    fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
-        self.get_storage_ranges_with_priority(request, Priority::Normal)
-    }
-
-    /// Sends a `GetStorageRanges` (`snap/2`) request to an available peer.
     fn get_storage_ranges_with_priority(
         &self,
         request: GetStorageRangesMessage,
         priority: Priority,
     ) -> Self::Output {
         self.send_snap_request(SnapProtocolMessage::GetStorageRanges(request), priority)
-    }
-
-    /// Sends a `GetByteCodes` (`snap/2`) request to an available peer.
-    fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
-        self.get_byte_codes_with_priority(request, Priority::Normal)
     }
 
     /// Sends a `GetByteCodes` (`snap/2`) request to an available peer.

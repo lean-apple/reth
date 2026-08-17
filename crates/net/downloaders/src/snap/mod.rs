@@ -287,7 +287,7 @@ mod tests {
     use futures::future::{ready, Ready};
     use reth_eth_wire_types::snap::{
         AccountData, ByteCodesMessage, GetBlockAccessListsMessage, GetByteCodesMessage,
-        GetStorageRangesMessage,
+        GetStorageRangesMessage, MAX_HASH,
     };
     use reth_network_p2p::download::DownloadClient;
     use reth_network_peers::WithPeerId;
@@ -296,8 +296,6 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
-
-    const MAX_HASH: B256 = B256::new([0xff; B256::len_bytes()]);
 
     #[derive(Debug)]
     struct TestSnapClient {
@@ -342,19 +340,11 @@ mod tests {
             self.next(priority)
         }
 
-        fn get_storage_ranges(&self, _request: GetStorageRangesMessage) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
         fn get_storage_ranges_with_priority(
             &self,
             _request: GetStorageRangesMessage,
             _priority: Priority,
         ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes(&self, _request: GetByteCodesMessage) -> Self::Output {
             ready(Err(RequestError::UnsupportedCapability))
         }
 

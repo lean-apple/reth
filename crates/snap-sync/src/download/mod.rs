@@ -30,9 +30,6 @@ const STORAGE_BATCH_SIZE: usize = 20;
 /// Maximum number of code hashes per bytecode request.
 const BYTECODE_BATCH_SIZE: usize = 50;
 
-/// Upper bound of the hashed key space.
-const MAX_HASH: B256 = B256::new([0xff; 32]);
-
 /// Downloads the hashed state at one state root from snap peers.
 #[derive(Debug)]
 pub struct StateDownloader<'a, C, F> {
@@ -199,7 +196,7 @@ mod tests {
     use reth_downloaders::snap::AccountRangeOutcome;
     use reth_eth_wire_types::snap::{
         AccountData, AccountRangeMessage, GetAccountRangeMessage, GetByteCodesMessage,
-        GetStorageRangesMessage,
+        GetStorageRangesMessage, MAX_HASH,
     };
     use reth_network_p2p::{
         download::DownloadClient, error::PeerRequestResult, priority::Priority,
@@ -244,20 +241,12 @@ mod tests {
             ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
         }
 
-        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
-            self.get_storage_ranges_with_priority(request, Priority::Normal)
-        }
-
         fn get_storage_ranges_with_priority(
             &self,
             _request: GetStorageRangesMessage,
             _priority: Priority,
         ) -> Self::Output {
             ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
-            self.get_byte_codes_with_priority(request, Priority::Normal)
         }
 
         fn get_byte_codes_with_priority(
@@ -304,10 +293,6 @@ mod tests {
             ready(self.responses.lock().unwrap().pop_front().expect("response available"))
         }
 
-        fn get_storage_ranges(&self, request: GetStorageRangesMessage) -> Self::Output {
-            self.get_storage_ranges_with_priority(request, Priority::Normal)
-        }
-
         fn get_storage_ranges_with_priority(
             &self,
             _request: GetStorageRangesMessage,
@@ -322,10 +307,6 @@ mod tests {
             _priority: Priority,
         ) -> Self::Output {
             ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes(&self, request: GetByteCodesMessage) -> Self::Output {
-            self.get_byte_codes_with_priority(request, Priority::Normal)
         }
 
         fn get_block_access_lists_with_priority(
