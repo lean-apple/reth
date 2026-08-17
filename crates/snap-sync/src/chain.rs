@@ -146,8 +146,18 @@ where
     }
 
     fn block_by_hash(factory: &F, hash: B256) -> Result<BlockRef, ChainError> {
-        let provider =
-            factory.database_provider_ro().map_err(|err| ChainError::Provider(err.to_string()))?;
+        Self::read(&Self::provider(factory)?, hash)
+    }
+
+    fn provider(factory: &F) -> Result<F::Provider, ChainError> {
+        factory.database_provider_ro().map_err(|err| ChainError::Provider(err.to_string()))
+    }
+
+    /// Reads one header through an already-open provider.
+    ///
+    /// Parent-link walks read many headers in a row, and opening a read transaction per header
+    /// costs more than the lookups themselves.
+    fn read(provider: &F::Provider, hash: B256) -> Result<BlockRef, ChainError> {
         let header = provider
             .sealed_header_by_hash(hash)
             .map_err(|err| ChainError::Provider(err.to_string()))?
@@ -177,9 +187,10 @@ where
     }
 
     async fn ancestor(&self, from: B256, depth: u64) -> Result<BlockRef, ChainError> {
-        let mut block = Self::block_by_hash(&self.factory, from)?;
+        let provider = Self::provider(&self.factory)?;
+        let mut block = Self::read(&provider, from)?;
         for _ in 0..depth {
-            block = Self::block_by_hash(&self.factory, block.parent_hash)?;
+            block = Self::read(&provider, block.parent_hash)?;
         }
         Ok(block)
     }
@@ -189,8 +200,9 @@ where
             return Ok(Vec::new())
         }
 
-        let anchor = Self::block_by_hash(&self.factory, ancestor)?;
-        let mut block = Self::block_by_hash(&self.factory, head)?;
+        let provider = Self::provider(&self.factory)?;
+        let anchor = Self::read(&provider, ancestor)?;
+        let mut block = Self::read(&provider, head)?;
         if anchor.number >= block.number {
             return Err(ChainError::NotAnAncestor { ancestor, head })
         }
@@ -198,7 +210,7 @@ where
         let mut blocks = Vec::with_capacity((block.number - anchor.number) as usize);
         while block.number > anchor.number {
             blocks.push(block);
-            block = Self::block_by_hash(&self.factory, block.parent_hash)?;
+            block = Self::read(&provider, block.parent_hash)?;
         }
         if block.hash != ancestor {
             return Err(ChainError::NotAnAncestor { ancestor, head })
