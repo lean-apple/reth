@@ -218,10 +218,11 @@ where
 
         loop {
             match session.run_until_blocked().await.map_err(snap_error)? {
-                SessionRunOutcome::Verified(at) => {
-                    session.accept().map_err(snap_error)?;
-                    return Ok(ControlFlow::Continue { block_number: at.number })
-                }
+                SessionRunOutcome::Verified(at) => match session.accept().await {
+                    Ok(_) => return Ok(ControlFlow::Continue { block_number: at.number }),
+                    Err(SnapSyncError::HeadAdvanced { .. } | SnapSyncError::Reorged(_)) => {}
+                    Err(error) => return Err(snap_error(error)),
+                },
                 SessionRunOutcome::WaitingForPeers => {
                     tokio::time::sleep(SNAP_PEER_WAIT).await;
                 }

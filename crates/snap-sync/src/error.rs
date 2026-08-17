@@ -28,6 +28,9 @@ pub enum SnapSyncError {
     /// The persisted generation marker could not be decoded.
     #[error("snap generation marker is corrupt")]
     CorruptGenerationMarker(#[source] alloy_rlp::Error),
+    /// Local blocking work panicked or was cancelled during shutdown.
+    #[error("snap sync blocking task failed")]
+    Task(#[from] tokio::task::JoinError),
     /// RLP decoding of a peer response failed.
     #[error("RLP decode error: {0}")]
     RlpDecode(String),

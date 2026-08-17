@@ -63,7 +63,7 @@ pub struct SnapSyncSession<C, F, H> {
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
     C: SnapClient + Clone + Unpin + 'static,
-    F: DatabaseProviderFactory,
+    F: Clone + DatabaseProviderFactory + 'static,
     F::Provider: AccountExtReader + DBProvider,
     F::ProviderRW: DBProvider<Tx: DbTxMut> + StateWriter + TrieWriter + StorageSettingsCache,
     H: CanonicalChainSource,
@@ -311,10 +311,15 @@ where
             return Err(SnapSyncError::InvalidState("finalize"))
         };
 
-        let token = self.chain.canonical_token();
         self.ensure_current_head(applied).await?;
+        let token = self.chain.canonical_token();
 
-        self.writer().finalize_sync(applied.number, applied.state_root)?;
+        let factory = self.factory.clone();
+        self.runtime
+            .spawn_blocking(move || {
+                SnapStateWriter::new(&factory).finalize_sync(applied.number, applied.state_root)
+            })
+            .await??;
 
         // Rebuilding the trie walks the whole state, long enough for forkchoice to move
         // underneath it and leave the check above stale. The work is only trusted if no
@@ -332,21 +337,6 @@ where
 
         info!(target: "snap", number = applied.number, hash = %applied.hash, "Snap state verified");
         Ok(applied)
-    }
-
-    /// Requires `block` to remain the exact canonical head.
-    async fn ensure_current_head(&mut self, block: BlockRef) -> Result<(), SnapSyncError> {
-        let head = self.chain.head();
-        if block.hash == head.hash {
-            return Ok(())
-        }
-
-        if self.chain.segment(block.hash, head.hash).await.is_ok() {
-            return Err(SnapSyncError::HeadAdvanced { from: block.hash, to: head.hash })
-        }
-
-        self.state = SyncState::Idle;
-        Err(SnapSyncError::Reorged(block.hash))
     }
 
     /// Chooses a recent target whose entire catch-up segment has BAL commitments.
@@ -482,16 +472,42 @@ where
 
 impl<C, F, H> SnapSyncSession<C, F, H>
 where
-    F: DatabaseProviderFactory,
+    H: CanonicalChainSource,
+{
+    /// Requires `block` to remain the exact canonical head.
+    ///
+    /// A head that only moved forward leaves the assembled state usable, so the session drops
+    /// back to healing and replays the new segment instead of downloading it all again.
+    async fn ensure_current_head(&mut self, block: BlockRef) -> Result<(), SnapSyncError> {
+        let head = self.chain.head();
+        if block.hash == head.hash {
+            return Ok(())
+        }
+
+        if self.chain.segment(block.hash, head.hash).await.is_ok() {
+            self.state = SyncState::Healing { target: block, applied: block };
+            return Err(SnapSyncError::HeadAdvanced { from: block.hash, to: head.hash })
+        }
+
+        self.state = SyncState::Idle;
+        Err(SnapSyncError::Reorged(block.hash))
+    }
+}
+
+impl<C, F, H> SnapSyncSession<C, F, H>
+where
+    F: Clone + DatabaseProviderFactory + 'static,
     F::ProviderRW:
         DBProvider<Tx: DbTxMut> + StageCheckpointWriter + StateWriter + StaticFileProviderFactory,
+    H: CanonicalChainSource,
 {
     /// Clears the generation marker after the node has installed the verified head.
-    pub fn accept(&mut self) -> Result<BlockRef, SnapSyncError> {
+    pub async fn accept(&mut self) -> Result<BlockRef, SnapSyncError> {
         let SyncState::Verified { at } = self.state else {
             return Err(SnapSyncError::InvalidState("accept verified state"))
         };
 
+        self.ensure_current_head(at).await?;
         SnapStateWriter::new(&self.factory).accept_generation(at.number)?;
         self.state = SyncState::Complete { at };
         Ok(at)
@@ -610,6 +626,38 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AdvancedChain {
+        previous: BlockRef,
+        head: BlockRef,
+    }
+
+    impl CanonicalChainSource for AdvancedChain {
+        fn head(&self) -> BlockRef {
+            self.head
+        }
+
+        fn canonical_token(&self) -> u64 {
+            1
+        }
+
+        async fn ancestor(&self, _from: B256, _depth: u64) -> Result<BlockRef, crate::ChainError> {
+            Ok(self.previous)
+        }
+
+        async fn segment(
+            &self,
+            ancestor: B256,
+            head: B256,
+        ) -> Result<Vec<BlockRef>, crate::ChainError> {
+            if ancestor == self.previous.hash && head == self.head.hash {
+                Ok(vec![self.head])
+            } else {
+                Err(crate::ChainError::NotAnAncestor { ancestor, head })
+            }
+        }
+    }
+
     fn block(number: u64, has_bal: bool) -> BlockRef {
         BlockRef {
             hash: B256::with_last_byte(number as u8),
@@ -642,8 +690,8 @@ mod tests {
         assert_eq!(bal_capable_target(initial, &catch_up), initial);
     }
 
-    #[test]
-    fn acceptance_clears_the_generation_marker_after_verification() {
+    #[tokio::test]
+    async fn acceptance_clears_the_generation_marker_after_verification() {
         let factory = create_test_provider_factory();
         factory.set_storage_settings_cache(StorageSettings::v2());
         let at = block(5, true);
@@ -658,7 +706,7 @@ mod tests {
             client: (),
             runtime: Runtime::test(),
             factory,
-            chain: (),
+            chain: FixedChain(at),
             bal_store: BalStoreHandle::noop(),
             verified_bal_blocks: HashSet::default(),
             state: SyncState::Verified { at },
@@ -666,9 +714,41 @@ mod tests {
             request_id: AtomicU64::new(0),
         };
 
-        assert_eq!(session.accept().unwrap(), at);
+        assert_eq!(session.accept().await.unwrap(), at);
         assert_eq!(session.state, SyncState::Complete { at });
         assert_eq!(SnapStateWriter::new(&session.factory).interrupted_generation().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn acceptance_reopens_healing_when_head_advanced() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let at = block(5, true);
+        let head = block(6, true);
+        let generation = SnapGeneration {
+            target_block: at.number,
+            target_hash: at.hash,
+            state_root: at.state_root,
+        };
+        SnapStateWriter::new(&factory).begin_generation(generation).unwrap();
+        let mut session = SnapSyncSession {
+            client: (),
+            runtime: Runtime::test(),
+            factory,
+            chain: AdvancedChain { previous: at, head },
+            bal_store: BalStoreHandle::noop(),
+            verified_bal_blocks: HashSet::default(),
+            state: SyncState::Verified { at },
+            metrics: SnapSyncMetrics::default(),
+            request_id: AtomicU64::new(0),
+        };
+
+        assert!(matches!(
+            session.accept().await,
+            Err(SnapSyncError::HeadAdvanced { from, to }) if from == at.hash && to == head.hash
+        ));
+        assert_eq!(session.state, SyncState::Healing { target: at, applied: at });
+        assert!(SnapStateWriter::new(&session.factory).interrupted_generation().unwrap().is_some());
     }
 
     #[tokio::test]
