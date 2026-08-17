@@ -194,128 +194,15 @@ fn next_hash(hash: B256) -> Option<B256> {
 mod tests {
     use super::*;
     use reth_downloaders::snap::AccountRangeOutcome;
-    use reth_eth_wire_types::snap::{
-        AccountData, AccountRangeMessage, GetAccountRangeMessage, GetByteCodesMessage,
-        GetStorageRangesMessage, MAX_HASH,
-    };
-    use reth_network_p2p::{
-        download::DownloadClient, error::PeerRequestResult, priority::Priority,
-        snap::client::SnapResponse,
-    };
+    use reth_eth_wire_types::snap::{AccountData, AccountRangeMessage, MAX_HASH};
+    use reth_network_p2p::{snap::client::SnapResponse, test_utils::TestSnapClient};
     use reth_network_peers::{PeerId, WithPeerId};
     use reth_provider::test_utils::create_test_provider_factory;
     use reth_trie_common::{HashBuilder, Nibbles, EMPTY_ROOT_HASH};
-    use std::{
-        collections::VecDeque,
-        future::{ready, Ready},
-        sync::{Arc, Mutex},
-    };
+    use std::sync::Arc;
 
     fn b256(value: u64) -> B256 {
         B256::left_padding_from(&value.to_be_bytes())
-    }
-
-    /// A client standing in for a network with no `snap/2` peer connected, which fails every snap
-    /// request outright rather than queueing it.
-    #[derive(Clone, Copy, Debug)]
-    struct NoSnapPeers;
-
-    impl DownloadClient for NoSnapPeers {
-        fn report_bad_message(&self, _peer_id: reth_network_peers::PeerId) {
-            panic!("a request that never reached a peer must not blame one")
-        }
-
-        fn num_connected_peers(&self) -> usize {
-            0
-        }
-    }
-
-    impl SnapClient for NoSnapPeers {
-        type Output = Ready<PeerRequestResult<SnapResponse>>;
-
-        fn get_account_range_with_priority(
-            &self,
-            _request: GetAccountRangeMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_storage_ranges_with_priority(
-            &self,
-            _request: GetStorageRangesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes_with_priority(
-            &self,
-            _request: GetByteCodesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_block_access_lists_with_priority(
-            &self,
-            _request: reth_eth_wire_types::snap::GetBlockAccessListsMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct AccountRangeClient {
-        responses: Arc<Mutex<VecDeque<PeerRequestResult<SnapResponse>>>>,
-        reported: Arc<Mutex<Vec<PeerId>>>,
-    }
-
-    impl DownloadClient for AccountRangeClient {
-        fn report_bad_message(&self, peer_id: PeerId) {
-            self.reported.lock().unwrap().push(peer_id);
-        }
-
-        fn num_connected_peers(&self) -> usize {
-            3
-        }
-    }
-
-    impl SnapClient for AccountRangeClient {
-        type Output = Ready<PeerRequestResult<SnapResponse>>;
-
-        fn get_account_range_with_priority(
-            &self,
-            _request: GetAccountRangeMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(self.responses.lock().unwrap().pop_front().expect("response available"))
-        }
-
-        fn get_storage_ranges_with_priority(
-            &self,
-            _request: GetStorageRangesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes_with_priority(
-            &self,
-            _request: GetByteCodesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
-
-        fn get_block_access_lists_with_priority(
-            &self,
-            _request: reth_eth_wire_types::snap::GetBlockAccessListsMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(reth_network_p2p::error::RequestError::UnsupportedCapability))
-        }
     }
 
     #[test]
@@ -327,8 +214,10 @@ mod tests {
     #[tokio::test]
     async fn an_empty_peer_set_pauses_the_download_rather_than_ending_it() {
         let factory = create_test_provider_factory();
-        let mut downloader =
-            StateDownloader::new(NoSnapPeers, &factory, b256(0xabc), Runtime::test());
+        // A network with no snap peer connected fails every request outright rather than
+        // queueing it.
+        let client = Arc::new(TestSnapClient::unavailable());
+        let mut downloader = StateDownloader::new(client, &factory, b256(0xabc), Runtime::test());
 
         // A session that starts before any snap peer connects would otherwise exhaust its retry
         // budget instantly and report a failed sync.
@@ -364,9 +253,8 @@ mod tests {
         .map(|(response, peer_id)| {
             Ok(WithPeerId::new(peer_id, SnapResponse::AccountRange(response)))
         })
-        .collect();
-        let reported = Arc::new(Mutex::new(Vec::new()));
-        let client = AccountRangeClient { responses: Arc::new(Mutex::new(responses)), reported };
+        .collect::<Vec<_>>();
+        let client = Arc::new(TestSnapClient::new(responses).with_connected_peers(3));
         let factory = create_test_provider_factory();
         let mut downloader = StateDownloader::new(client, &factory, root_hash, Runtime::test());
 
@@ -379,6 +267,6 @@ mod tests {
                 has_more: false,
             })
         );
-        assert!(downloader.client.reported.lock().unwrap().is_empty());
+        assert!(downloader.client.reported().is_empty());
     }
 }

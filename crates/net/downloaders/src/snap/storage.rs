@@ -1,12 +1,11 @@
 //! Storage range downloads authenticated against account storage roots.
 
-use super::MAX_RETRIES;
+use crate::snap::request::{SnapVerifier, VerifyingRequest};
 use alloy_primitives::{B256, U256};
-use futures::{Future, FutureExt};
+use futures::Future;
 use reth_eth_wire_types::snap::{GetStorageRangesMessage, StorageData, MAX_HASH};
 use reth_network_p2p::{
     error::RequestError,
-    priority::Priority,
     snap::client::{SnapClient, SnapResponse},
 };
 use reth_network_peers::PeerId;
@@ -14,7 +13,7 @@ use reth_tasks::Runtime;
 use reth_trie_common::{range_proof::verify_range_proof, TrieAccount};
 use std::{
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 /// Downloads and verifies storage ranges for accounts authenticated by an account-range response.
@@ -23,17 +22,12 @@ use std::{
 /// account. Complete lists are checked directly against their storage roots, while the optional
 /// proof authenticates only the final, partial list.
 #[derive(Debug)]
-pub struct StorageRangeDownloader<C: SnapClient> {
-    client: C,
-    runtime: Runtime,
-    request: GetStorageRangesMessage,
-    storage_roots: Vec<B256>,
-    fut: C::Output,
-    verification: Option<StorageVerificationTask>,
-    retries: u8,
-}
+pub struct StorageRangeDownloader<C: SnapClient>(VerifyingRequest<C, StorageProofVerifier>);
 
-impl<C: SnapClient> StorageRangeDownloader<C> {
+impl<C> StorageRangeDownloader<C>
+where
+    C: SnapClient + Unpin + 'static,
+{
     /// Validates the request against `accounts`, submits it at normal priority, and uses `runtime`
     /// for proof verification.
     pub fn new(
@@ -71,53 +65,39 @@ impl<C: SnapClient> StorageRangeDownloader<C> {
             storage_roots.push(account.storage_root);
         }
 
-        let fut = client.get_storage_ranges(request.clone());
-        Ok(Self { client, runtime, request, storage_roots, fut, verification: None, retries: 0 })
+        let verifier = StorageProofVerifier { request: request.clone(), storage_roots };
+        Ok(Self(VerifyingRequest::new(client, request, verifier, runtime)))
     }
+}
 
-    // Reissues the request at high priority while retry budget remains.
-    fn retry(&mut self) -> bool {
-        if self.retries >= MAX_RETRIES {
-            return false
-        }
-        self.retries += 1;
-        self.fut =
-            self.client.get_storage_ranges_with_priority(self.request.clone(), Priority::High);
-        true
+impl<C> Future for StorageRangeDownloader<C>
+where
+    C: SnapClient + Unpin + 'static,
+{
+    type Output = Result<StorageRangeOutcome, RequestError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().0.poll_verified(cx)
     }
+}
 
-    // Keep peer attribution while decoding and proof work run off the async worker.
-    fn start_verification(&mut self, peer_id: PeerId, response: SnapResponse) {
-        let verifier = StorageProofVerifier {
-            request: self.request.clone(),
-            storage_roots: self.storage_roots.clone(),
-        };
-        let fut = self.runtime.spawn_blocking(move || verifier.verify_response(peer_id, response));
-        self.verification = Some(StorageVerificationTask { peer_id, fut });
-    }
+// Owns the request context moved to the blocking verifier.
+#[derive(Clone, Debug)]
+struct StorageProofVerifier {
+    request: GetStorageRangesMessage,
+    storage_roots: Vec<B256>,
+}
 
-    // Retry only after an invalid proof has been attributed to its responder.
-    fn poll_verification(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<StorageRangeOutcome>, RequestError>> {
-        let verification = self.verification.as_mut().expect("verification task is present");
-        let result = ready!(verification.fut.poll_unpin(cx));
-        let peer_id = verification.peer_id;
-        self.verification = None;
+impl SnapVerifier for StorageProofVerifier {
+    type Request = GetStorageRangesMessage;
+    type Output = StorageRangeOutcome;
 
-        match result {
-            Ok(Ok(outcome)) => Poll::Ready(Ok(Some(outcome))),
-            Ok(Err(error)) => {
-                tracing::debug!(target: "downloaders::snap", ?peer_id, %error, "Invalid storage ranges response");
-                self.client.report_bad_message(peer_id);
-                Poll::Ready(self.retry().then_some(None).ok_or(error))
-            }
-            Err(error) => {
-                tracing::debug!(target: "downloaders::snap", %error, "Storage range verification task failed");
-                Poll::Ready(Err(RequestError::ChannelClosed))
-            }
-        }
+    fn verify(
+        self,
+        peer_id: PeerId,
+        response: SnapResponse,
+    ) -> Result<StorageRangeOutcome, RequestError> {
+        self.verify_response(peer_id, response)
     }
 }
 
@@ -255,59 +235,6 @@ impl StorageProofVerifier {
     }
 }
 
-impl<C> Future for StorageRangeDownloader<C>
-where
-    C: SnapClient + Unpin + 'static,
-{
-    type Output = Result<StorageRangeOutcome, RequestError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        loop {
-            if this.verification.is_some() {
-                match ready!(this.poll_verification(cx)) {
-                    Ok(Some(outcome)) => return Poll::Ready(Ok(outcome)),
-                    Ok(None) => {}
-                    Err(error) => return Poll::Ready(Err(error)),
-                }
-            }
-
-            match ready!(this.fut.poll_unpin(cx)) {
-                Ok(response) => {
-                    let (peer_id, response) = response.split();
-                    this.start_verification(peer_id, response);
-                }
-                Err(error) if error.is_retryable() || error == RequestError::BadResponse => {
-                    tracing::debug!(
-                        target: "downloaders::snap",
-                        %error,
-                        "Storage ranges request failed, retrying"
-                    );
-                    if !this.retry() {
-                        return Poll::Ready(Err(error))
-                    }
-                }
-                Err(error) => return Poll::Ready(Err(error)),
-            }
-        }
-    }
-}
-
-// Owns the request context moved to the blocking verifier.
-#[derive(Debug)]
-struct StorageProofVerifier {
-    request: GetStorageRangesMessage,
-    storage_roots: Vec<B256>,
-}
-
-// Couples blocking proof work with its responder so failures remain attributable.
-#[derive(Debug)]
-struct StorageVerificationTask {
-    peer_id: PeerId,
-    fut: tokio::task::JoinHandle<Result<StorageRangeOutcome, RequestError>>,
-}
-
 /// The result of an authenticated storage-ranges request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageRangeOutcome {
@@ -398,87 +325,15 @@ pub enum InvalidStorageRangeRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snap::request::MAX_RETRIES;
     use alloy_primitives::{Bytes, KECCAK256_EMPTY};
-    use futures::future::{ready, Ready};
-    use reth_eth_wire_types::snap::{
-        AccountRangeMessage, GetAccountRangeMessage, GetBlockAccessListsMessage,
-        GetByteCodesMessage, StorageRangesMessage,
+    use reth_eth_wire_types::snap::{AccountRangeMessage, StorageRangesMessage};
+    use reth_network_p2p::{
+        error::PeerRequestResult, priority::Priority, test_utils::TestSnapClient,
     };
-    use reth_network_p2p::{download::DownloadClient, error::PeerRequestResult};
     use reth_network_peers::WithPeerId;
     use reth_trie_common::{proof::ProofRetainer, HashBuilder, Nibbles, EMPTY_ROOT_HASH};
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, Mutex},
-    };
-
-    #[derive(Debug)]
-    struct TestSnapClient {
-        responses: Mutex<VecDeque<PeerRequestResult<SnapResponse>>>,
-        reported: Mutex<Vec<PeerId>>,
-        priorities: Mutex<Vec<Priority>>,
-    }
-
-    impl TestSnapClient {
-        fn new(responses: impl IntoIterator<Item = PeerRequestResult<SnapResponse>>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into_iter().collect()),
-                reported: Mutex::new(Vec::new()),
-                priorities: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn next(&self, priority: Priority) -> Ready<PeerRequestResult<SnapResponse>> {
-            self.priorities.lock().unwrap().push(priority);
-            ready(self.responses.lock().unwrap().pop_front().expect("test response available"))
-        }
-    }
-
-    impl DownloadClient for TestSnapClient {
-        fn report_bad_message(&self, peer_id: PeerId) {
-            self.reported.lock().unwrap().push(peer_id);
-        }
-
-        fn num_connected_peers(&self) -> usize {
-            1
-        }
-    }
-
-    impl SnapClient for TestSnapClient {
-        type Output = Ready<PeerRequestResult<SnapResponse>>;
-
-        fn get_account_range_with_priority(
-            &self,
-            _request: GetAccountRangeMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_storage_ranges_with_priority(
-            &self,
-            _request: GetStorageRangesMessage,
-            priority: Priority,
-        ) -> Self::Output {
-            self.next(priority)
-        }
-
-        fn get_byte_codes_with_priority(
-            &self,
-            _request: GetByteCodesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_block_access_lists_with_priority(
-            &self,
-            _request: GetBlockAccessListsMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-    }
+    use std::sync::Arc;
 
     fn key(value: u64) -> B256 {
         B256::left_padding_from(&value.to_be_bytes())
@@ -574,7 +429,7 @@ mod tests {
                 continuation: None,
             })
         );
-        assert!(client.reported.lock().unwrap().is_empty());
+        assert!(client.reported().is_empty());
     }
 
     #[tokio::test]
@@ -687,7 +542,7 @@ mod tests {
             downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert_eq!(outcome, StorageRangeOutcome::Unavailable { peer_id });
-        assert!(client.reported.lock().unwrap().is_empty());
+        assert!(client.reported().is_empty());
     }
 
     #[tokio::test]
@@ -711,8 +566,8 @@ mod tests {
             downloader(Arc::clone(&client), request(&accounts), &accounts).unwrap().await.unwrap();
 
         assert!(matches!(outcome, StorageRangeOutcome::Verified(_)));
-        assert_eq!(*client.reported.lock().unwrap(), [bad_peer]);
-        assert_eq!(*client.priorities.lock().unwrap(), [Priority::Normal, Priority::High]);
+        assert_eq!(*client.reported(), [bad_peer]);
+        assert_eq!(*client.priorities(), [Priority::Normal, Priority::High]);
     }
 
     #[tokio::test]
@@ -732,7 +587,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, RequestError::BadResponse);
-        assert_eq!(client.reported.lock().unwrap().len(), attempts);
+        assert_eq!(client.reported().len(), attempts);
     }
 
     #[test]

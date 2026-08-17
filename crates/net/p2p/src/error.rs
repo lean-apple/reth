@@ -65,7 +65,8 @@ impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
                 RequestError::ChannelClosed |
                 RequestError::ConnectionDropped |
                 RequestError::UnsupportedCapability |
-                RequestError::BadResponse => None,
+                RequestError::BadResponse |
+                RequestError::Internal => None,
                 RequestError::Timeout => Some(ReputationChangeKind::Timeout),
             }
         } else {
@@ -99,6 +100,12 @@ pub enum RequestError {
     /// Indicates a bad response was received.
     #[display("received bad response")]
     BadResponse,
+    /// The request failed locally, without the peer being at fault.
+    ///
+    /// Covers work the node does on a response's behalf — verification on the blocking pool, for
+    /// instance — panicking or being cancelled during shutdown.
+    #[display("request failed locally")]
+    Internal,
 }
 
 // === impl RequestError ===

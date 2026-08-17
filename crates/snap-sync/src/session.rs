@@ -566,63 +566,9 @@ const fn pivot_depth(head: u64) -> u64 {
 mod tests {
     use super::*;
     use reth_db_api::models::StorageSettings;
-    use reth_eth_wire_types::snap::{
-        GetAccountRangeMessage, GetByteCodesMessage, GetStorageRangesMessage,
-    };
-    use reth_network_p2p::{
-        download::DownloadClient, error::PeerRequestResult, priority::Priority,
-    };
+    use reth_network_p2p::test_utils::TestSnapClient;
     use reth_provider::test_utils::create_test_provider_factory;
-    use std::future::{ready, Ready};
-
-    #[derive(Clone, Copy, Debug)]
-    struct NoSnapPeers;
-
-    impl DownloadClient for NoSnapPeers {
-        fn report_bad_message(&self, _peer_id: reth_network_peers::PeerId) {
-            panic!("a request never reached a peer")
-        }
-
-        fn num_connected_peers(&self) -> usize {
-            0
-        }
-    }
-
-    impl SnapClient for NoSnapPeers {
-        type Output = Ready<PeerRequestResult<SnapResponse>>;
-
-        fn get_account_range_with_priority(
-            &self,
-            _request: GetAccountRangeMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_storage_ranges_with_priority(
-            &self,
-            _request: GetStorageRangesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_byte_codes_with_priority(
-            &self,
-            _request: GetByteCodesMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-
-        fn get_block_access_lists_with_priority(
-            &self,
-            _request: GetBlockAccessListsMessage,
-            _priority: Priority,
-        ) -> Self::Output {
-            ready(Err(RequestError::UnsupportedCapability))
-        }
-    }
+    use std::sync::Arc;
 
     #[derive(Debug)]
     struct FixedChain(BlockRef);
@@ -723,8 +669,9 @@ mod tests {
         let factory = create_test_provider_factory();
         factory.set_storage_settings_cache(StorageSettings::v2());
         let head = block(0, true);
+        // A network with no snap peer connected fails every request outright.
         let mut session = SnapSyncSession::new(
-            NoSnapPeers,
+            Arc::new(TestSnapClient::unavailable()),
             factory,
             FixedChain(head),
             BalStoreHandle::noop(),
