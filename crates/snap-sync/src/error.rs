@@ -1,6 +1,8 @@
 //! Errors surfaced by a snap sync session.
 
+use crate::chain::ChainError;
 use alloy_primitives::B256;
+use reth_storage_api::errors::{db::DatabaseError, provider::ProviderError};
 
 /// Errors that can occur during snap sync.
 #[derive(Debug, thiserror::Error)]
@@ -14,9 +16,18 @@ pub enum SnapSyncError {
     /// rather than anything the chain or the peer set did.
     #[error("snap sync session cannot {0} in its current state")]
     InvalidState(&'static str),
+    /// A provider operation failed.
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
     /// A database operation failed.
-    #[error("database error: {0}")]
-    Database(String),
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+    /// The canonical chain could not answer.
+    #[error(transparent)]
+    Chain(#[from] ChainError),
+    /// The persisted generation marker could not be decoded.
+    #[error("snap generation marker is corrupt")]
+    CorruptGenerationMarker(#[source] alloy_rlp::Error),
     /// RLP decoding of a peer response failed.
     #[error("RLP decode error: {0}")]
     RlpDecode(String),

@@ -325,9 +325,7 @@ where
         }
 
         let verified_bal_blocks = self.verified_bal_blocks.iter().copied().collect::<Vec<_>>();
-        self.bal_store.flush(&verified_bal_blocks).map_err(|err| {
-            SnapSyncError::Database(format!("flushing block access lists: {err}"))
-        })?;
+        self.bal_store.flush(&verified_bal_blocks)?;
         self.verified_bal_blocks.clear();
 
         self.state = SyncState::Verified { at: applied };
@@ -362,15 +360,8 @@ where
         }
 
         let depth = pivot_depth(head.number);
-        let initial = self
-            .chain
-            .ancestor(head.hash, depth)
-            .await
-            .map_err(|err| SnapSyncError::Network(format!("resolving a sync target: {err}")))?;
-        let segment =
-            self.chain.segment(initial.hash, head.hash).await.map_err(|err| {
-                SnapSyncError::Network(format!("checking sync target BALs: {err}"))
-            })?;
+        let initial = self.chain.ancestor(head.hash, depth).await?;
+        let segment = self.chain.segment(initial.hash, head.hash).await?;
 
         Ok(bal_capable_target(initial, &segment))
     }

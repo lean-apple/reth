@@ -84,30 +84,28 @@ where
     where
         F::ProviderRW: StorageSettingsCache,
     {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        let provider = self.factory.database_provider_rw()?;
         if !provider.cached_storage_settings().use_hashed_state() {
             return Err(SnapSyncError::UnsupportedStorageLayout)
         }
         {
             let tx = provider.tx_ref();
-            tx.clear::<tables::HashedAccounts>().map_err(db_err)?;
-            tx.clear::<tables::HashedStorages>().map_err(db_err)?;
-            tx.clear::<tables::AccountsTrie>().map_err(db_err)?;
-            tx.clear::<tables::StoragesTrie>().map_err(db_err)?;
+            tx.clear::<tables::HashedAccounts>()?;
+            tx.clear::<tables::HashedStorages>()?;
+            tx.clear::<tables::AccountsTrie>()?;
+            tx.clear::<tables::StoragesTrie>()?;
             // The checkpoint row keeps the marker visible to standard stage tooling; the progress
             // blob carries what a height alone cannot say.
             tx.put::<tables::StageCheckpoints>(
                 SNAP_SYNC_STAGE.to_string(),
                 StageCheckpoint::new(generation.target_block),
-            )
-            .map_err(db_err)?;
+            )?;
             tx.put::<tables::StageCheckpointProgresses>(
                 SNAP_SYNC_STAGE.to_string(),
                 alloy_rlp::encode(generation),
-            )
-            .map_err(db_err)?;
+            )?;
         }
-        provider.commit().map_err(db_err)?;
+        provider.commit()?;
         Ok(())
     }
 
@@ -117,21 +115,19 @@ where
     /// has to follow, or a restart would blame the wrong block for the state on disk. Leaves the
     /// tables alone: the downloaded prefix is exactly what the transition carries over.
     pub fn update_generation(&self, generation: SnapGeneration) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        let provider = self.factory.database_provider_rw()?;
         {
             let tx = provider.tx_ref();
             tx.put::<tables::StageCheckpoints>(
                 SNAP_SYNC_STAGE.to_string(),
                 StageCheckpoint::new(generation.target_block),
-            )
-            .map_err(db_err)?;
+            )?;
             tx.put::<tables::StageCheckpointProgresses>(
                 SNAP_SYNC_STAGE.to_string(),
                 alloy_rlp::encode(generation),
-            )
-            .map_err(db_err)?;
+            )?;
         }
-        provider.commit().map_err(db_err)?;
+        provider.commit()?;
         Ok(())
     }
 
@@ -140,14 +136,12 @@ where
     where
         F::ProviderRW: StageCheckpointWriter + StaticFileProviderFactory,
     {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        provider.update_pipeline_stages(block_number, false).map_err(db_err)?;
+        let provider = self.factory.database_provider_rw()?;
+        provider.update_pipeline_stages(block_number, false)?;
         {
             let tx = provider.tx_ref();
-            tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)
-                .map_err(db_err)?;
-            tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)
-                .map_err(db_err)?;
+            tx.delete::<tables::StageCheckpoints>(SNAP_SYNC_STAGE.to_string(), None)?;
+            tx.delete::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string(), None)?;
         }
 
         // Snap supplies state but not historical block data. Empty advancement lets the normal
@@ -160,14 +154,10 @@ where
             StaticFileSegment::AccountChangeSets,
             StaticFileSegment::StorageChangeSets,
         ] {
-            static_files
-                .latest_writer(segment)
-                .map_err(db_err)?
-                .ensure_at_block(block_number)
-                .map_err(db_err)?;
+            static_files.latest_writer(segment)?.ensure_at_block(block_number)?;
         }
-        static_files.commit().map_err(db_err)?;
-        provider.commit().map_err(db_err)?;
+        static_files.commit()?;
+        provider.commit()?;
         Ok(())
     }
 
@@ -181,20 +171,19 @@ where
         state: HashedPostState,
         codes: &[(B256, Bytes)],
     ) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
+        let provider = self.factory.database_provider_rw()?;
 
         if !state.is_empty() {
-            provider.write_hashed_state(&state.into_sorted()).map_err(db_err)?;
+            provider.write_hashed_state(&state.into_sorted())?;
         }
         {
             let tx = provider.tx_ref();
             for (hash, code) in codes.iter().filter(|(_, code)| !code.is_empty()) {
-                tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone()))
-                    .map_err(db_err)?;
+                tx.put::<tables::Bytecodes>(*hash, Bytecode::new_raw(code.clone()))?;
             }
         }
 
-        provider.commit().map_err(db_err)?;
+        provider.commit()?;
         Ok(())
     }
 }
@@ -209,8 +198,8 @@ where
         &self,
         addresses: impl IntoIterator<Item = Address>,
     ) -> Result<Vec<(Address, Option<Account>)>, SnapSyncError> {
-        let provider = self.factory.database_provider_ro().map_err(db_err)?;
-        provider.basic_accounts(addresses).map_err(db_err)
+        let provider = self.factory.database_provider_ro()?;
+        Ok(provider.basic_accounts(addresses)?)
     }
 }
 
@@ -224,18 +213,17 @@ where
     /// `Some` means the hashed state on disk is a partial download and must not be read as though
     /// it were a synced node's state.
     pub fn interrupted_generation(&self) -> Result<Option<SnapGeneration>, SnapSyncError> {
-        let provider = self.factory.database_provider_ro().map_err(db_err)?;
+        let provider = self.factory.database_provider_ro()?;
         let Some(blob) = provider
             .tx_ref()
-            .get::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string())
-            .map_err(db_err)?
+            .get::<tables::StageCheckpointProgresses>(SNAP_SYNC_STAGE.to_string())?
         else {
             return Ok(None)
         };
 
         alloy_rlp::Decodable::decode(&mut blob.as_slice())
             .map(Some)
-            .map_err(|err| SnapSyncError::Database(format!("snap generation marker: {err}")))
+            .map_err(SnapSyncError::CorruptGenerationMarker)
     }
 }
 
@@ -273,8 +261,7 @@ where
         let computed = state_root_with_committed_updates(
             self.factory,
             entries_per_chunk.unwrap_or(STATE_ROOT_COMMIT_THRESHOLD),
-        )
-        .map_err(|err| SnapSyncError::Database(format!("state root computation: {err}")))?;
+        )?;
 
         if computed != expected {
             self.clear_trie()?;
@@ -288,16 +275,12 @@ where
     }
 
     fn clear_trie(&self) -> Result<(), SnapSyncError> {
-        let provider = self.factory.database_provider_rw().map_err(db_err)?;
-        provider.tx_ref().clear::<tables::AccountsTrie>().map_err(db_err)?;
-        provider.tx_ref().clear::<tables::StoragesTrie>().map_err(db_err)?;
-        DBProvider::commit(provider).map_err(db_err)?;
+        let provider = self.factory.database_provider_rw()?;
+        provider.tx_ref().clear::<tables::AccountsTrie>()?;
+        provider.tx_ref().clear::<tables::StoragesTrie>()?;
+        DBProvider::commit(provider)?;
         Ok(())
     }
-}
-
-fn db_err(err: impl core::fmt::Display) -> SnapSyncError {
-    SnapSyncError::Database(err.to_string())
 }
 
 #[cfg(test)]
@@ -601,7 +584,7 @@ mod tests {
         let limited = LimitedRwFactory { inner: factory, remaining: AtomicUsize::new(3) };
         assert!(matches!(
             SnapStateWriter::new(&limited).finalize_sync_chunked(100, root, Some(1)),
-            Err(SnapSyncError::Database(_))
+            Err(SnapSyncError::Provider(_))
         ));
         assert!(!trie_is_empty(&limited));
         assert_eq!(
