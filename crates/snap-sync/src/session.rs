@@ -164,7 +164,7 @@ where
     /// recorded, so the caller can advance the target and resume rather than start over.
     pub async fn download(&mut self) -> Result<StepOutcome, SnapSyncError> {
         let SyncState::Downloading { target, covered_end } = self.state else {
-            return Err(SnapSyncError::Network("session is not downloading".into()))
+            return Err(SnapSyncError::InvalidState("download"))
         };
 
         let mut downloader = StateDownloader::new(
@@ -203,7 +203,7 @@ where
     /// the new one, which leaves the prefix unreconcilable and restarts the session.
     pub async fn advance_target(&mut self) -> Result<StepOutcome, SnapSyncError> {
         let SyncState::Downloading { target, covered_end } = self.state else {
-            return Err(SnapSyncError::Network("session is not downloading".into()))
+            return Err(SnapSyncError::InvalidState("advance its target"))
         };
 
         let head = self.chain.head();
@@ -261,7 +261,7 @@ where
     /// sideways or backwards yields a different segment rather than a mismatched height.
     pub async fn heal(&mut self) -> Result<StepOutcome, SnapSyncError> {
         let SyncState::Healing { target, applied } = self.state else {
-            return Err(SnapSyncError::Network("session is not healing".into()))
+            return Err(SnapSyncError::InvalidState("heal"))
         };
 
         let head = self.chain.head();
@@ -308,7 +308,7 @@ where
     /// is still a root that matches nothing the node will build on.
     pub async fn finalize(&mut self) -> Result<BlockRef, SnapSyncError> {
         let SyncState::Healing { applied, .. } = self.state else {
-            return Err(SnapSyncError::Network("session has nothing to finalize".into()))
+            return Err(SnapSyncError::InvalidState("finalize"))
         };
 
         let token = self.chain.canonical_token();
@@ -491,7 +491,7 @@ where
     /// Clears the generation marker after the node has installed the verified head.
     pub fn accept(&mut self) -> Result<BlockRef, SnapSyncError> {
         let SyncState::Verified { at } = self.state else {
-            return Err(SnapSyncError::Network("session has no verified state to accept".into()))
+            return Err(SnapSyncError::InvalidState("accept verified state"))
         };
 
         SnapStateWriter::new(&self.factory).accept_generation(at.number)?;

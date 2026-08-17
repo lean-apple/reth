@@ -8,6 +8,12 @@ pub enum SnapSyncError {
     /// A network request failed or a peer returned a malformed response.
     #[error("network request failed: {0}")]
     Network(String),
+    /// A session step was driven from a state that cannot serve it.
+    ///
+    /// The session is the one serialized owner of its generation, so this is a caller mistake
+    /// rather than anything the chain or the peer set did.
+    #[error("snap sync session cannot {0} in its current state")]
+    InvalidState(&'static str),
     /// A database operation failed.
     #[error("database error: {0}")]
     Database(String),
