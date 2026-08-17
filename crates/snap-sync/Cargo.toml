@@ -16,9 +16,8 @@ workspace = true
 reth-db-api.workspace = true
 reth-downloaders.workspace = true
 reth-eth-wire-types.workspace = true
-reth-network-p2p.workspace = true
-metrics.workspace = true
 reth-metrics.workspace = true
+reth-network-p2p.workspace = true
 reth-network-peers.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
@@ -37,6 +36,7 @@ alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 
 # misc
+metrics.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
