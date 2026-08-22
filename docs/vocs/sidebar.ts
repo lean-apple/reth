@@ -102,6 +102,10 @@ export const sidebar: SidebarItem[] = [
                             }
                         ]
                     },
+                    {
+                        text: "Snap Sync (snap/2)",
+                        link: "/run/snap-sync"
+                    },
                 ]
             },
             {

@@ -2,11 +2,14 @@ use crate::{DatabaseHashedCursorFactory, DatabaseTrieCursorFactory};
 use alloy_primitives::{keccak256, map::B256Map, BlockNumber, B256};
 use reth_db_api::{
     models::{AccountBeforeTx, BlockNumberAddress},
-    transaction::DbTx,
+    transaction::{DbTx, DbTxMut},
 };
 use reth_execution_errors::StateRootError;
-use reth_storage_api::{ChangeSetReader, DBProvider, StorageChangeSetReader, StorageSettingsCache};
-use reth_storage_errors::provider::ProviderError;
+use reth_storage_api::{
+    ChangeSetReader, DBProvider, DatabaseProviderFactory, StorageChangeSetReader,
+    StorageSettingsCache, TrieWriter,
+};
+use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_trie::{
     hashed_cursor::HashedPostStateCursorFactory, trie_cursor::InMemoryTrieCursorFactory,
     updates::TrieUpdates, HashedPostStateSorted, HashedStorageSorted, StateRoot, StateRootProgress,
@@ -16,7 +19,7 @@ use std::{
     collections::HashSet,
     ops::{Bound, RangeBounds, RangeInclusive},
 };
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 /// Extends [`StateRoot`] with operations specific for working with a database transaction.
 pub trait DatabaseStateRoot<'a, TX>: Sized {
@@ -330,6 +333,67 @@ impl DatabaseHashedPostState for HashedPostStateSorted {
             .collect();
 
         Ok(Self::new(accounts, hashed_storages))
+    }
+}
+
+/// Default number of hashed-state entries processed per committed trie rebuild chunk.
+pub const STATE_ROOT_COMMIT_THRESHOLD: u64 = 25_000;
+
+/// Rebuilds the trie from hashed state, committing updates after each chunk.
+/// Callers restarting after an interruption must clear the incomplete trie first.
+pub fn state_root_with_committed_updates<PF>(
+    provider_factory: &PF,
+    threshold: u64,
+) -> ProviderResult<B256>
+where
+    PF: DatabaseProviderFactory,
+    PF::ProviderRW: DBProvider<Tx: DbTxMut> + TrieWriter + StorageSettingsCache,
+{
+    let provider = provider_factory.database_provider_rw()?;
+    crate::with_adapter!(&provider, |A| {
+        drop(provider);
+        state_root_with_committed_updates_inner::<PF, A>(provider_factory, threshold)
+    })
+}
+
+fn state_root_with_committed_updates_inner<PF, A>(
+    provider_factory: &PF,
+    threshold: u64,
+) -> ProviderResult<B256>
+where
+    PF: DatabaseProviderFactory,
+    PF::ProviderRW: DBProvider<Tx: DbTxMut> + TrieWriter + StorageSettingsCache,
+    A: crate::TrieTableAdapter,
+{
+    let mut intermediate_state = None;
+    let mut total_flushed_updates = 0;
+
+    loop {
+        let provider = provider_factory.database_provider_rw()?;
+        let progress = StateRoot::<
+            DatabaseTrieCursorFactory<&_, A>,
+            DatabaseHashedCursorFactory<&_>,
+        >::from_tx(provider.tx_ref())
+        .with_intermediate_state(intermediate_state.take())
+        .with_threshold(threshold)
+        .root_with_progress()?;
+
+        match progress {
+            StateRootProgress::Progress(state, _, updates) => {
+                let updated_len = provider.write_trie_updates(updates)?;
+                total_flushed_updates += updated_len;
+                info!(target: "trie::db", last_account_key = %state.account_root_state.last_hashed_key, updated_len, total_flushed_updates, "Committing trie rebuild progress");
+                intermediate_state = Some(*state);
+                provider.commit()?;
+            }
+            StateRootProgress::Complete(root, _, updates) => {
+                let updated_len = provider.write_trie_updates(updates)?;
+                total_flushed_updates += updated_len;
+                provider.commit()?;
+                info!(target: "trie::db", %root, updated_len, total_flushed_updates, "Trie rebuild complete");
+                return Ok(root)
+            }
+        }
     }
 }
 

@@ -12,6 +12,12 @@ use alloy_rlp::{BufMut, Decodable, Encodable, RlpDecodable, RlpEncodable};
 use alloy_trie::{TrieAccount, EMPTY_ROOT_HASH};
 use reth_codecs_derive::add_arbitrary_tests;
 
+/// Upper bound of the hashed key space, and the limit an unbounded range request carries.
+///
+/// A snap request's `limit_hash` is inclusive, so this is the value that asks a server for
+/// everything to the end of a trie.
+pub const MAX_HASH: B256 = B256::repeat_byte(0xff);
+
 /// Supported SNAP protocol versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -139,6 +145,12 @@ impl AccountData {
             storage_root: SlimAccountBody::restore(&slim.storage_root, EMPTY_ROOT_HASH)?,
             code_hash: SlimAccountBody::restore(&slim.code_hash, KECCAK256_EMPTY)?,
         })
+    }
+
+    /// Consumes the wire value and returns its hashed key with the decoded trie account.
+    pub fn into_trie_entry(self) -> alloy_rlp::Result<(B256, TrieAccount)> {
+        let account = self.trie_account()?;
+        Ok((self.hash, account))
     }
 }
 
@@ -885,12 +897,14 @@ mod tests {
     #[test]
     fn slim_body_elides_empty_storage_and_code() {
         let account = trie_account(EMPTY_ROOT_HASH, KECCAK256_EMPTY);
-        let encoded = AccountData::from_trie_account(B256::repeat_byte(1), &account);
+        let hash = B256::repeat_byte(1);
+        let encoded = AccountData::from_trie_account(hash, &account);
 
         let body = SlimAccountBody::decode(&mut encoded.body.as_ref()).unwrap();
         assert!(body.storage_root.is_empty());
         assert!(body.code_hash.is_empty());
         assert_eq!(encoded.trie_account().unwrap(), account);
+        assert_eq!(encoded.into_trie_entry().unwrap(), (hash, account));
     }
 
     #[test]

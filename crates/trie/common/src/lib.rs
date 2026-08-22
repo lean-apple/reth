@@ -36,6 +36,10 @@ pub use constants::*;
 mod account;
 pub use account::TrieAccount;
 
+/// Post-block state values committed to by an EIP-7928 block access list entry.
+#[cfg(feature = "eip7928")]
+pub mod bal;
+
 /// V2 proof targets and chunking.
 pub mod target_v2;
 pub use target_v2::{
@@ -62,6 +66,9 @@ pub use trie::{BranchNodeMasks, BranchNodeMasksMap, ProofTrieNode};
 
 mod trie_node_v2;
 pub use trie_node_v2::*;
+
+/// Merkle Patricia trie range-proof verification.
+pub mod range_proof;
 
 /// The implementation of a container for storing intermediate changes to a trie.
 /// The container indicates when the trie has been modified.

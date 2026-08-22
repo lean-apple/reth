@@ -22,8 +22,8 @@ use futures::{future::Either, io, FutureExt, StreamExt};
 use reth_ecies::{stream::ECIESStream, ECIESError};
 use reth_eth_wire::{
     errors::EthStreamError, handshake::EthRlpxHandshake, multiplex::RlpxProtocolMultiplexer,
-    BlockRangeUpdate, Capabilities, DisconnectReason, EthSnapStream, EthStream, EthVersion,
-    HelloMessageWithProtocols, NetworkPrimitives, UnauthedP2PStream, UnifiedStatus,
+    BlockRangeUpdate, Capabilities, Capability, DisconnectReason, EthSnapStream, EthStream,
+    EthVersion, HelloMessageWithProtocols, NetworkPrimitives, UnauthedP2PStream, UnifiedStatus,
     HANDSHAKE_TIMEOUT,
 };
 use reth_ethereum_forks::{ForkFilter, ForkId, ForkTransition, Head};
@@ -55,6 +55,7 @@ use crate::session::active::{
     request_timeout_interval, BroadcastItemCounter, RANGE_UPDATE_INTERVAL,
 };
 pub use conn::EthRlpxConnection;
+use conn::{EthSatelliteConnection, SnapSatelliteProtocol};
 use handle::SessionCommandSender;
 pub use handle::{
     ActiveSessionHandle, ActiveSessionMessage, PendingSessionEvent, PendingSessionHandle,
@@ -1241,6 +1242,19 @@ async fn authenticate_stream<N: NetworkPrimitives>(
     } else {
         // Multiplex the stream with the extra protocols
         let mut multiplex_stream = RlpxProtocolMultiplexer::new(p2p_stream);
+        let mut snap = None;
+
+        // Native snap still needs a protocol stream when another shared capability selects the
+        // general multiplexer instead of the dedicated eth+snap connection.
+        if multiplex_stream.shared_capabilities().contains(&Capability::snap_2()) {
+            multiplex_stream
+                .install_protocol(&Capability::snap_2(), |connection| {
+                    let (protocol, handle) = SnapSatelliteProtocol::new(connection);
+                    snap = Some(handle);
+                    protocol
+                })
+                .expect("snap/2 was negotiated");
+        }
 
         // install additional handlers
         for handler in extra_handlers.into_iter() {
@@ -1262,7 +1276,9 @@ async fn authenticate_stream<N: NetworkPrimitives>(
             .into_eth_satellite_stream(status, fork_filter, handshake, eth_max_message_size)
             .await
         {
-            Ok((multiplex_stream, their_status)) => (multiplex_stream, their_status),
+            Ok((multiplex_stream, their_status)) => {
+                (EthSatelliteConnection::new(multiplex_stream, snap), their_status)
+            }
             Err(err) => {
                 return PendingSessionEvent::Disconnected {
                     remote_addr,

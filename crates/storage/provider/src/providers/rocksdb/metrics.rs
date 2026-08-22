@@ -12,6 +12,7 @@ pub(super) const ROCKSDB_TABLES: &[&str] = &[
     Tables::BlockAccessListBlockNumbers.name(),
     Tables::StoragesHistory.name(),
     Tables::AccountsHistory.name(),
+    Tables::BlockAccessLists.name(),
 ];
 
 /// Metrics for the `RocksDB` provider.

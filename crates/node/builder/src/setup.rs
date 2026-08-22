@@ -19,13 +19,48 @@ use reth_node_api::HeaderTy;
 use reth_provider::{providers::ProviderNodeTypes, ProviderFactory};
 use reth_stages::{
     prelude::DefaultStages,
-    stages::{EraImportSource, ExecutionStage},
+    stages::{EraImportSource, ExecutionStage, HeaderStage},
     Pipeline, StageId, StageSet,
 };
 use reth_static_file::StaticFileProducer;
 use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::debug;
 use tokio::sync::watch;
+
+/// Constructs a pipeline containing Reth's validated header stage only.
+#[expect(clippy::too_many_arguments)]
+pub fn build_networked_header_pipeline<N, Client>(
+    config: &StageConfig,
+    client: Client,
+    consensus: Arc<dyn FullConsensus<N::Primitives>>,
+    provider_factory: ProviderFactory<N>,
+    task_executor: &TaskExecutor,
+    metrics_tx: reth_stages::MetricEventsSender,
+    max_block: Option<BlockNumber>,
+    static_file_producer: StaticFileProducer<ProviderFactory<N>>,
+) -> Pipeline<N>
+where
+    N: ProviderNodeTypes,
+    Client: BlockClient<Block = BlockTy<N>> + 'static,
+{
+    let header_downloader = ReverseHeadersDownloaderBuilder::new(config.headers)
+        .build(client, consensus)
+        .into_task_with(task_executor);
+    let (tip_tx, tip_rx) = watch::channel(B256::ZERO);
+    let mut builder = Pipeline::<N>::builder().with_tip_sender(tip_tx).with_metrics_tx(metrics_tx);
+    if let Some(max_block) = max_block {
+        builder = builder.with_max_block(max_block);
+    }
+
+    builder
+        .add_stage(HeaderStage::new(
+            provider_factory.clone(),
+            header_downloader,
+            tip_rx,
+            config.etl.clone(),
+        ))
+        .build(provider_factory, static_file_producer)
+}
 
 /// Constructs a [Pipeline] that's wired to the network
 #[expect(clippy::too_many_arguments)]
