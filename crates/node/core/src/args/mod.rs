@@ -54,7 +54,9 @@ pub use dev::{DefaultDevArgs, DevArgs};
 
 /// PruneArgs for configuring the pruning and full node
 mod pruning;
-pub use pruning::{DefaultPruningValues, PruneConfigKind, PruningArgs};
+pub use pruning::{
+    DefaultPruningValues, PruneConfigKind, PruningArgs, CL_HISTORY_RETENTION_BLOCKS,
+};
 
 /// DatadirArgs for configuring data storage paths
 mod datadir_args;

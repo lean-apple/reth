@@ -1505,6 +1505,7 @@ mod tests {
             let node_config = NodeConfig {
                 pruning: PruningArgs {
                     full: true,
+                    history_expiry: false,
                     minimal: false,
                     block_interval: None,
                     sender_recovery_full: false,

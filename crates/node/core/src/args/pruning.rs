@@ -13,6 +13,12 @@ use std::{collections::BTreeMap, ops::Not, sync::OnceLock};
 /// Global static pruning defaults
 static PRUNING_DEFAULTS: OnceLock<DefaultPruningValues> = OnceLock::new();
 
+/// Full-node history window matching the CL's minimum block-serving period.
+///
+/// The CL requires blocks to remain available for 33,024 epochs. Using the maximum of one
+/// execution block per slot gives a conservative EL window when slots are missed.
+pub const CL_HISTORY_RETENTION_BLOCKS: u64 = 33_024 * 32;
+
 /// Default values for `--full` and `--minimal` pruning modes that can be customized.
 ///
 /// Global defaults can be set via [`DefaultPruningValues::try_init`].
@@ -50,11 +56,19 @@ impl DefaultPruningValues {
 
     /// Set whether `--full` should use pre-merge pruning for bodies history.
     ///
-    /// When `true` (default), bodies are pruned before the Paris hardfork block.
+    /// When `true`, bodies are pruned before the Paris hardfork block.
     /// When `false`, uses `full_prune_modes.bodies_history` directly.
     pub const fn with_full_bodies_history_use_pre_merge(mut self, use_pre_merge: bool) -> Self {
         self.full_bodies_history_use_pre_merge = use_pre_merge;
         self
+    }
+
+    /// Returns the `--history-expiry` prune modes.
+    pub fn history_expiry_prune_modes(&self) -> PruneModes {
+        let mut modes = self.full_prune_modes.clone();
+        modes.receipts = Some(PruneMode::Distance(CL_HISTORY_RETENTION_BLOCKS));
+        modes.bodies_history = Some(PruneMode::Distance(CL_HISTORY_RETENTION_BLOCKS));
+        modes
     }
 
     /// Set the prune modes for `--minimal` flag.
@@ -98,6 +112,8 @@ pub enum PruneConfigKind {
     Archive,
     /// Full node pruning preset.
     Full,
+    /// Full node with the CL-aligned history expiry window.
+    HistoryExpiry,
     /// Minimal storage pruning preset.
     Minimal,
     /// Custom pruning configuration.
@@ -110,6 +126,7 @@ impl PruneConfigKind {
         match self {
             Self::Archive => "archive",
             Self::Full => "full",
+            Self::HistoryExpiry => "history-expiry",
             Self::Minimal => "minimal",
             Self::Custom => "custom",
         }
@@ -129,6 +146,12 @@ impl PruneConfigKind {
             return Self::Full
         }
 
+        let history_expiry_config =
+            PruningArgs { history_expiry: true, ..Default::default() }.prune_config(chain_spec);
+        if history_expiry_config.as_ref() == Some(config) {
+            return Self::HistoryExpiry
+        }
+
         let minimal_config =
             PruningArgs { minimal: true, ..Default::default() }.prune_config(chain_spec);
         if minimal_config.as_ref() == Some(config) {
@@ -145,8 +168,12 @@ impl PruneConfigKind {
 pub struct PruningArgs {
     /// Run full node. Only the most recent [`MINIMUM_UNWIND_SAFE_DISTANCE`] block states are
     /// stored.
-    #[arg(long, default_value_t = false, conflicts_with = "minimal")]
+    #[arg(long, default_value_t = false, conflicts_with_all = ["minimal", "history_expiry"])]
     pub full: bool,
+
+    /// Run a full node with block bodies and receipts retained for the CL block-serving window.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["full", "minimal"])]
+    pub history_expiry: bool,
 
     /// Run minimal storage mode with maximum pruning and smaller static files.
     ///
@@ -154,7 +181,7 @@ pub struct PruningArgs {
     /// - Fully pruning sender recovery, transaction lookup, receipts
     /// - Leaving 10,064 blocks for account, storage history and block bodies
     /// - Using 10,000 blocks per static file segment
-    #[arg(long, default_value_t = false, conflicts_with = "full")]
+    #[arg(long, default_value_t = false, conflicts_with_all = ["full", "history_expiry"])]
     pub minimal: bool,
 
     /// Minimum pruning interval measured in blocks.
@@ -276,6 +303,14 @@ impl PruningArgs {
             config = PruneConfig {
                 block_interval: config.block_interval,
                 segments,
+                minimum_pruning_distance: config.minimum_pruning_distance,
+            }
+        }
+
+        if self.history_expiry {
+            config = PruneConfig {
+                block_interval: config.block_interval,
+                segments: DefaultPruningValues::get_global().history_expiry_prune_modes(),
                 minimum_pruning_distance: config.minimum_pruning_distance,
             }
         }
@@ -493,7 +528,35 @@ mod tests {
 
         let full_config =
             PruningArgs { full: true, ..Default::default() }.prune_config(chain_spec).unwrap();
+        assert_eq!(
+            full_config.segments.receipts,
+            Some(PruneMode::Distance(MINIMUM_UNWIND_SAFE_DISTANCE))
+        );
         assert_eq!(PruneConfigKind::from_config(&full_config, chain_spec), PruneConfigKind::Full);
+
+        let history_expiry_config = PruningArgs { history_expiry: true, ..Default::default() }
+            .prune_config(chain_spec)
+            .unwrap();
+        assert_eq!(
+            history_expiry_config.segments.receipts,
+            Some(PruneMode::Distance(CL_HISTORY_RETENTION_BLOCKS))
+        );
+        assert_eq!(
+            history_expiry_config.segments.bodies_history,
+            Some(PruneMode::Distance(CL_HISTORY_RETENTION_BLOCKS))
+        );
+        assert_eq!(
+            history_expiry_config.segments.account_history,
+            full_config.segments.account_history
+        );
+        assert_eq!(
+            history_expiry_config.segments.storage_history,
+            full_config.segments.storage_history
+        );
+        assert_eq!(
+            PruneConfigKind::from_config(&history_expiry_config, chain_spec),
+            PruneConfigKind::HistoryExpiry
+        );
 
         let minimal_config =
             PruningArgs { minimal: true, ..Default::default() }.prune_config(chain_spec).unwrap();

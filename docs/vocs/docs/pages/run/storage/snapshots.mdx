@@ -5,9 +5,9 @@ description: Start Reth from public modular snapshots.
 # Snapshots
 
 Reth publishes modular node snapshots at
-[snapshots.reth.rs](https://snapshots.reth.rs). The snapshot UI lets you choose
-minimal, full, or archive components and gives you the matching `reth download`
-command.
+[snapshots.reth.rs](https://snapshots.reth.rs). The snapshot UI lets you choose components and gives
+you the matching `reth download` command. The CLI also provides minimal, full, history-expiry, and
+archive presets.
 
 Use snapshots when you want to avoid syncing from genesis. `reth download`
 extracts the selected components into your Reth data directory. It also writes
@@ -45,6 +45,9 @@ reth download --minimal
 
 # Full-node profile
 reth download --full
+
+# CL-aligned history-expiry profile
+reth download --history-expiry
 
 # Archive profile
 reth download --archive

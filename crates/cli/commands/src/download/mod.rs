@@ -108,7 +108,7 @@ use reth_db::{init_db, Database};
 use reth_db_api::transaction::DbTx;
 use reth_fs_util as fs;
 use reth_node_core::args::DefaultPruningValues;
-use reth_prune_types::PruneMode;
+use reth_prune_types::{PruneMode, PruneModes};
 use source::{
     discover_manifest_url, fetch_manifest_from_source, fetch_snapshot_api_entries,
     print_snapshot_listing, resolve_manifest_base_url,
@@ -138,6 +138,8 @@ pub(crate) enum SelectionPreset {
     Minimal,
     /// Full-node data matching the default full prune settings.
     Full,
+    /// Full-node data retaining the CL-aligned history expiry window.
+    HistoryExpiry,
     /// All available snapshot data.
     Archive,
 }
@@ -411,6 +413,10 @@ pub struct DownloadCommand<C: ChainSpecParser> {
     #[arg(long, conflicts_with_all = ["with_txs", "with_txs_since", "with_txs_distance", "with_receipts", "with_receipts_since", "with_receipts_distance", "with_state_history", "with_state_history_since", "with_state_history_distance", "with_senders", "with_rocksdb", "archive", "minimal"])]
     full: bool,
 
+    /// Download a full node retaining the CL-aligned history expiry window.
+    #[arg(long, conflicts_with_all = ["with_txs", "with_txs_since", "with_txs_distance", "with_receipts", "with_receipts_since", "with_receipts_distance", "with_state_history", "with_state_history_since", "with_state_history_distance", "with_senders", "with_rocksdb", "archive", "minimal", "full"])]
+    history_expiry: bool,
+
     /// Skip optional RocksDB indices even when archive components are selected.
     ///
     /// This affects `--archive`/`--all` and TUI archive preset (`a`).
@@ -658,6 +664,13 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
             });
         }
 
+        if self.history_expiry {
+            return Ok(ResolvedComponents {
+                selections: self.history_expiry_preset_selections(manifest),
+                preset: Some(SelectionPreset::HistoryExpiry),
+            });
+        }
+
         if self.minimal {
             return Ok(ResolvedComponents {
                 selections: self.minimal_preset_selections(manifest),
@@ -767,6 +780,32 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         &self,
         manifest: &SnapshotManifest,
     ) -> BTreeMap<SnapshotComponentType, ComponentSelection> {
+        let defaults = DefaultPruningValues::get_global();
+        self.pruning_preset_selections(
+            manifest,
+            &defaults.full_prune_modes,
+            defaults.full_bodies_history_use_pre_merge,
+        )
+    }
+
+    /// Builds the CL-aligned history expiry component selection for the manifest.
+    fn history_expiry_preset_selections(
+        &self,
+        manifest: &SnapshotManifest,
+    ) -> BTreeMap<SnapshotComponentType, ComponentSelection> {
+        self.pruning_preset_selections(
+            manifest,
+            &DefaultPruningValues::get_global().history_expiry_prune_modes(),
+            false,
+        )
+    }
+
+    fn pruning_preset_selections(
+        &self,
+        manifest: &SnapshotManifest,
+        prune_modes: &PruneModes,
+        bodies_history_use_pre_merge: bool,
+    ) -> BTreeMap<SnapshotComponentType, ComponentSelection> {
         let mut selections = BTreeMap::new();
 
         for ty in [
@@ -783,7 +822,12 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                 continue;
             }
 
-            let selection = self.full_selection_for_component(ty, manifest.block);
+            let selection = self.pruning_selection_for_component(
+                ty,
+                manifest.block,
+                prune_modes,
+                bodies_history_use_pre_merge,
+            );
             if selection != ComponentSelection::None {
                 selections.insert(ty, selection);
             }
@@ -792,19 +836,20 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
         selections
     }
 
-    /// Returns the full preset selection for one component type.
-    fn full_selection_for_component(
+    /// Returns a pruning preset selection for one component type.
+    fn pruning_selection_for_component(
         &self,
         ty: SnapshotComponentType,
         snapshot_block: u64,
+        prune_modes: &PruneModes,
+        bodies_history_use_pre_merge: bool,
     ) -> ComponentSelection {
-        let defaults = DefaultPruningValues::get_global();
         match ty {
             SnapshotComponentType::State | SnapshotComponentType::Headers => {
                 ComponentSelection::All
             }
             SnapshotComponentType::Transactions => {
-                if defaults.full_bodies_history_use_pre_merge {
+                if bodies_history_use_pre_merge {
                     match self
                         .env
                         .chain
@@ -816,23 +861,20 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>> DownloadCo
                         None => ComponentSelection::All,
                     }
                 } else {
-                    selection_from_prune_mode(
-                        defaults.full_prune_modes.bodies_history,
-                        snapshot_block,
-                    )
+                    selection_from_prune_mode(prune_modes.bodies_history, snapshot_block)
                 }
             }
             SnapshotComponentType::Receipts => {
-                selection_from_prune_mode(defaults.full_prune_modes.receipts, snapshot_block)
+                selection_from_prune_mode(prune_modes.receipts, snapshot_block)
             }
             SnapshotComponentType::AccountChangesets => {
-                selection_from_prune_mode(defaults.full_prune_modes.account_history, snapshot_block)
+                selection_from_prune_mode(prune_modes.account_history, snapshot_block)
             }
             SnapshotComponentType::StorageChangesets => {
-                selection_from_prune_mode(defaults.full_prune_modes.storage_history, snapshot_block)
+                selection_from_prune_mode(prune_modes.storage_history, snapshot_block)
             }
             SnapshotComponentType::TransactionSenders => {
-                selection_from_prune_mode(defaults.full_prune_modes.sender_recovery, snapshot_block)
+                selection_from_prune_mode(prune_modes.sender_recovery, snapshot_block)
             }
             // Keep hidden by default in full mode; if users want indices they can use archive.
             SnapshotComponentType::RocksdbIndices => ComponentSelection::None,

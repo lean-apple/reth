@@ -205,6 +205,17 @@ pub(crate) fn config_for_selections(
         };
     }
 
+    if matches!(preset, Some(SelectionPreset::HistoryExpiry)) {
+        return Config {
+            prune: PruneConfig {
+                segments: DefaultPruningValues::get_global().history_expiry_prune_modes(),
+                ..Default::default()
+            },
+            static_files,
+            ..Default::default()
+        };
+    }
+
     let mut config = Config::default();
     let mut prune = PruneConfig::default();
 
@@ -523,6 +534,27 @@ mod tests {
             .block_number()
             .expect("mainnet Paris block should be known");
         assert_eq!(config.prune.segments.bodies_history, Some(PruneMode::Before(paris_block)));
+    }
+
+    #[test]
+    fn history_expiry_preset_uses_cl_retention_window() {
+        let config = config_for_selections(
+            &BTreeMap::new(),
+            &empty_manifest(),
+            Some(SelectionPreset::HistoryExpiry),
+            Some(reth_chainspec::MAINNET.as_ref()),
+        );
+
+        assert_eq!(config.prune.segments.sender_recovery, Some(PruneMode::Full));
+        assert_eq!(config.prune.segments.transaction_lookup, None);
+        assert_eq!(
+            config.prune.segments.receipts,
+            Some(PruneMode::Distance(reth_node_core::args::CL_HISTORY_RETENTION_BLOCKS))
+        );
+        assert_eq!(
+            config.prune.segments.bodies_history,
+            Some(PruneMode::Distance(reth_node_core::args::CL_HISTORY_RETENTION_BLOCKS))
+        );
     }
 
     #[test]

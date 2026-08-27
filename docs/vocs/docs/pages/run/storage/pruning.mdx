@@ -16,6 +16,8 @@ data is retained.
 -   Archive node - retains all historical data from genesis.
 -   Full node - keeps current state and a 10,064-block historical state window,
     while pruning selected historical data.
+-   History-expiry node - uses full-node state pruning while retaining 1,056,768 blocks of
+    bodies and receipts.
 -   Minimal node - uses the most aggressive built-in pruning profile for small
     disk usage.
 -   Custom-pruned node - uses [custom pruning configuration](/run/configuration#the-prune-section)
@@ -57,6 +59,31 @@ Full mode configures:
 -   account history pruning: retain the last 10,064 blocks
 -   storage history pruning: retain the last 10,064 blocks
 -   bodies pruning: prune pre-Merge bodies on chains with a Paris activation
+
+### History Expiry Node
+
+Use `--history-expiry` to retain the CL block-serving window without changing the existing full
+node preset:
+
+```bash
+reth node \
+    --history-expiry \
+    --authrpc.jwtsecret /path/to/secret \
+    --authrpc.addr 127.0.0.1 \
+    --authrpc.port 8551
+```
+
+This mode uses the same state-history settings as `--full`, but retains the last 1,056,768 blocks
+(33,024 epochs) of bodies and receipts. Its receipt window is about 105 times larger than `--full`,
+with correspondingly higher receipt download and storage requirements.
+
+Enabling the mode cannot restore history that an existing full node has already pruned. A
+history-expiry snapshot provides a replacement data directory with the required history:
+
+```bash
+reth download --history-expiry --datadir /path/to/reth-history-expiry -y
+reth node --history-expiry --datadir /path/to/reth-history-expiry
+```
 
 ### Minimal Storage Mode
 
