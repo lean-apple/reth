@@ -6,12 +6,14 @@
 //! payloads for the whole bootstrap rather than racing it.
 
 use futures::FutureExt;
-use reth_engine_tree::backfill::{BackfillAction, BackfillEvent, BackfillSync};
+use reth_engine_tree::backfill::{BackfillAction, BackfillEvent, BackfillSync, PipelineSync};
 use reth_errors::RethError;
 use reth_network_p2p::{headers::client::HeadersClient, snap::client::SnapClient};
 use reth_provider::{providers::ProviderNodeTypes, ProviderFactory};
-use reth_snap_sync::{NodeSnapContext, SnapPivotPolicy, SnapSyncOutcome, SnapSyncSession};
-use reth_stages_api::{ControlFlow, Pipeline, PipelineError, PipelineTarget, StageId};
+use reth_snap_sync::{
+    NodeSnapContext, SnapPivotPolicy, SnapStateStore, SnapSyncOutcome, SnapSyncSession,
+};
+use reth_stages_api::{Pipeline, PipelineError, PipelineTarget, PipelineWithResult, StageId};
 use reth_tasks::{shutdown::signal, Runtime};
 use std::task::{ready, Context, Poll};
 use tokio::sync::oneshot;
@@ -22,6 +24,8 @@ use tracing::{debug, info};
 /// One backfill run is headers, then state download, then the remaining stages above the published
 /// pivot. [`BackfillEvent::Finished`] is only emitted once all three are done, so the engine never
 /// treats the persisted chain as ready while stage bookkeeping is still inconsistent.
+/// Once state is published, subsequent backfills delegate to [`PipelineSync`]. Databases with
+/// existing execution progress use [`PipelineSync`] without starting a snapshot.
 #[derive(Debug)]
 pub struct SnapBackfillSync<N: ProviderNodeTypes, C> {
     /// Serves the snap requests, and reports peer counts to the session.
@@ -62,10 +66,6 @@ impl<N: ProviderNodeTypes, C> SnapBackfillSync<N, C> {
         self
     }
 
-    const fn is_idle(&self) -> bool {
-        matches!(self.state, SnapBackfillState::Idle(_))
-    }
-
     /// Queues a target, ignoring the zero hash the engine can hand out before it knows a tip.
     fn set_target(&mut self, target: PipelineTarget) {
         if target.sync_target().is_some_and(|target| target.is_zero()) {
@@ -85,6 +85,21 @@ where
     fn try_spawn(&mut self) -> Option<BackfillEvent> {
         let SnapBackfillState::Idle(pipeline) = &mut self.state else { return None };
         let target = self.pending_target.take()?;
+        match SnapStateStore::new(&self.provider_factory).requires_bootstrap() {
+            Ok(true) => {}
+            Ok(false) => {
+                let pipeline = pipeline.take().expect("idle backfill owns its pipeline");
+                let mut sync = PipelineSync::new(*pipeline, self.task_spawner.clone());
+                sync.on_action(BackfillAction::Start(target));
+                self.state = SnapBackfillState::Pipeline(sync);
+                return None
+            }
+            Err(error) => {
+                return Some(BackfillEvent::Finished(Err(PipelineError::Internal(
+                    RethError::other(error),
+                ))))
+            }
+        }
         let pipeline = pipeline.take().expect("idle backfill owns its pipeline");
 
         let (tx, rx) = oneshot::channel();
@@ -95,7 +110,7 @@ where
 
         self.task_spawner.spawn_critical_blocking_task("snap backfill task", async move {
             let result =
-                bootstrap(pipeline, client, provider_factory, runtime, policy, target).await;
+                bootstrap(*pipeline, client, provider_factory, runtime, policy, target).await;
             let _ = tx.send(result);
         });
         self.state = SnapBackfillState::Running(rx);
@@ -108,7 +123,7 @@ where
         let SnapBackfillState::Running(rx) = &mut self.state else { return Poll::Pending };
         let event = match ready!(rx.poll_unpin(cx)) {
             Ok((pipeline, result)) => {
-                self.state = SnapBackfillState::Idle(Some(pipeline));
+                self.state = SnapBackfillState::Idle(Some(Box::new(pipeline)));
                 BackfillEvent::Finished(result)
             }
             Err(error) => BackfillEvent::TaskDropped(error.to_string()),
@@ -123,6 +138,10 @@ where
     C: SnapClient + HeadersClient + Clone + Unpin + 'static,
 {
     fn on_action(&mut self, action: BackfillAction) {
+        if let SnapBackfillState::Pipeline(sync) = &mut self.state {
+            sync.on_action(action);
+            return
+        }
         match action {
             BackfillAction::Start(target) => self.set_target(target),
         }
@@ -132,15 +151,13 @@ where
         if let Some(event) = self.try_spawn() {
             return Poll::Ready(event)
         }
-        if !self.is_idle() {
-            return self.poll_bootstrap(cx)
+        match &mut self.state {
+            SnapBackfillState::Pipeline(sync) => sync.poll(cx),
+            SnapBackfillState::Running(_) => self.poll_bootstrap(cx),
+            SnapBackfillState::Idle(_) => Poll::Pending,
         }
-        Poll::Pending
     }
 }
-
-/// What one bootstrap hands back: the pipeline it borrowed, and how its final run ended.
-type BootstrapResult<N> = (Box<Pipeline<N>>, Result<ControlFlow, PipelineError>);
 
 /// Owns the pipeline while idle and the bootstrap's result channel while running.
 ///
@@ -151,18 +168,20 @@ enum SnapBackfillState<N: ProviderNodeTypes> {
     /// No bootstrap in flight; the pipeline is parked here.
     Idle(Option<Box<Pipeline<N>>>),
     /// A bootstrap is running and will return the pipeline with its result.
-    Running(oneshot::Receiver<BootstrapResult<N>>),
+    Running(oneshot::Receiver<PipelineWithResult<N>>),
+    /// Snapshot bootstrap is no longer needed; ordinary backfill owns the pipeline permanently.
+    Pipeline(PipelineSync<N>),
 }
 
 /// Runs headers, then the state download, then the stages above the published pivot.
 async fn bootstrap<N, C>(
-    mut pipeline: Box<Pipeline<N>>,
+    mut pipeline: Pipeline<N>,
     client: C,
     provider_factory: ProviderFactory<N>,
     runtime: Runtime,
     policy: SnapPivotPolicy,
     target: PipelineTarget,
-) -> BootstrapResult<N>
+) -> PipelineWithResult<N>
 where
     N: ProviderNodeTypes,
     C: SnapClient + HeadersClient,
@@ -203,8 +222,7 @@ where
 
     // Stages the published frontier satisfies skip straight to the pivot, so this only executes
     // what is genuinely missing above it.
-    let (pipeline, result) = (*pipeline).run_as_fut(Some(target)).await;
-    (Box::new(pipeline), result)
+    pipeline.run_as_fut(Some(target)).await
 }
 
 #[cfg(test)]
@@ -212,17 +230,25 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
     use reth_network_p2p::NoopFullBlockClient;
-    use reth_provider::test_utils::{create_test_provider_factory, MockNodeTypesWithDB};
+    use reth_provider::{
+        test_utils::{create_test_provider_factory, MockNodeTypesWithDB},
+        DBProvider, DatabaseProviderFactory, StageCheckpointWriter, StorageSettings,
+        StorageSettingsCache,
+    };
     use reth_prune::PruneModes;
+    use reth_stages_api::{ControlFlow, StageCheckpoint};
     use reth_static_file::StaticFileProducer;
     use std::task::Waker;
 
     fn backfill() -> SnapBackfillSync<MockNodeTypesWithDB, NoopFullBlockClient> {
         let factory = create_test_provider_factory();
-        let pipeline = Pipeline::<MockNodeTypesWithDB>::builder().build(
-            factory.clone(),
-            StaticFileProducer::new(factory.clone(), PruneModes::default()),
-        );
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let pipeline = Pipeline::<MockNodeTypesWithDB>::builder()
+            .with_tip_sender(tokio::sync::watch::channel(B256::ZERO).0)
+            .build(
+                factory.clone(),
+                StaticFileProducer::new(factory.clone(), PruneModes::default()),
+            );
         SnapBackfillSync::new(pipeline, NoopFullBlockClient::default(), factory, Runtime::test())
     }
 
@@ -255,6 +281,111 @@ mod tests {
 
         assert!(matches!(event, Poll::Ready(BackfillEvent::Started(started)) if started == target));
         // The pipeline moved into the running bootstrap, so no second run can start beside it.
-        assert!(!backfill.is_idle());
+        assert!(matches!(backfill.state, SnapBackfillState::Running(_)));
+    }
+
+    #[tokio::test]
+    async fn existing_state_uses_ordinary_backfill() {
+        for stage in [StageId::Execution, StageId::Finish, StageId::Other("SnapSync")] {
+            let mut backfill = backfill();
+            let provider = backfill.provider_factory.database_provider_rw().unwrap();
+            provider.save_stage_checkpoint(stage, StageCheckpoint::new(42)).unwrap();
+            provider.commit().unwrap();
+
+            let target = PipelineTarget::Sync(B256::repeat_byte(1));
+            backfill.on_action(BackfillAction::Start(target));
+            assert!(
+                matches!(backfill.poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(BackfillEvent::Started(started)) if started == target)
+            );
+            assert!(matches!(backfill.state, SnapBackfillState::Pipeline(_)));
+
+            // A target queued during ordinary backfill must stay with PipelineSync, not start
+            // another snapshot after the current run finishes.
+            let next_target = PipelineTarget::Sync(B256::repeat_byte(2));
+            backfill.on_action(BackfillAction::Start(next_target));
+            assert!(matches!(
+                futures::future::poll_fn(|cx| backfill.poll(cx)).await,
+                BackfillEvent::Finished(Ok(_))
+            ));
+            assert!(
+                matches!(futures::future::poll_fn(|cx| backfill.poll(cx)).await, BackfillEvent::Started(started) if started == next_target)
+            );
+            assert!(matches!(
+                futures::future::poll_fn(|cx| backfill.poll(cx)).await,
+                BackfillEvent::Finished(Ok(_))
+            ));
+            assert!(SnapStateStore::new(&backfill.provider_factory)
+                .interrupted_generation()
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_bootstrap_hands_pending_target_to_pipeline() {
+        let mut backfill = backfill();
+        let SnapBackfillState::Idle(ref mut pipeline) = backfill.state else { unreachable!() };
+        let pipeline = pipeline.take().unwrap();
+        let (tx, rx) = oneshot::channel();
+        backfill.state = SnapBackfillState::Running(rx);
+        let target = PipelineTarget::Sync(B256::repeat_byte(2));
+        backfill.on_action(BackfillAction::Start(target));
+
+        // Model the atomic publication performed by the snapshot task before it returns its
+        // pipeline. The wrapper must observe the durable marker on the same instance.
+        let provider = backfill.provider_factory.database_provider_rw().unwrap();
+        provider
+            .save_stage_checkpoint(StageId::Other("SnapSync"), StageCheckpoint::new(42))
+            .unwrap();
+        provider.commit().unwrap();
+        tx.send((*pipeline, Ok(ControlFlow::NoProgress { block_number: None }))).unwrap();
+
+        assert!(matches!(
+            futures::future::poll_fn(|cx| backfill.poll(cx)).await,
+            BackfillEvent::Finished(Ok(_))
+        ));
+        assert!(
+            matches!(futures::future::poll_fn(|cx| backfill.poll(cx)).await, BackfillEvent::Started(started) if started == target)
+        );
+        assert!(matches!(backfill.state, SnapBackfillState::Pipeline(_)));
+        assert!(matches!(
+            futures::future::poll_fn(|cx| backfill.poll(cx)).await,
+            BackfillEvent::Finished(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn interrupted_bootstrap_keeps_the_snapshot_path() {
+        let mut backfill = backfill();
+        let store = SnapStateStore::new(&backfill.provider_factory);
+        let generation =
+            reth_snap_sync::SnapGeneration::new(100, B256::repeat_byte(1), B256::repeat_byte(2));
+        store.begin_generation(generation).unwrap();
+
+        backfill.on_action(BackfillAction::Start(PipelineTarget::Sync(B256::repeat_byte(3))));
+        assert!(matches!(
+            backfill.poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(BackfillEvent::Started(_))
+        ));
+        assert!(matches!(backfill.state, SnapBackfillState::Running(_)));
+        assert_eq!(
+            SnapStateStore::new(&backfill.provider_factory).interrupted_generation().unwrap(),
+            Some(generation)
+        );
+    }
+
+    #[test]
+    fn invalid_generation_does_not_start_either_sync_path() {
+        let mut backfill = backfill();
+        let provider = backfill.provider_factory.database_provider_rw().unwrap();
+        provider.save_stage_checkpoint_progress(StageId::Other("SnapSync"), vec![0xff]).unwrap();
+        provider.commit().unwrap();
+
+        backfill.on_action(BackfillAction::Start(PipelineTarget::Sync(B256::repeat_byte(1))));
+        assert!(matches!(
+            backfill.poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(BackfillEvent::Finished(Err(_)))
+        ));
+        assert!(matches!(backfill.state, SnapBackfillState::Idle(Some(_))));
     }
 }

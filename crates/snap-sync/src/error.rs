@@ -59,6 +59,9 @@ pub enum SnapSyncError {
     /// The database uses plain canonical state, which hashed Snap keys cannot populate.
     #[error("snap sync requires the v2 hashed-state layout")]
     UnsupportedStorageLayout,
+    /// Snapshot bootstrap would replace an executed or already published state.
+    #[error("snap bootstrap cannot replace existing canonical state")]
+    ExistingState,
     /// A generation operation was attempted in the wrong phase.
     #[error("snap generation is in {actual:?}, expected {expected:?}")]
     UnexpectedPhase {

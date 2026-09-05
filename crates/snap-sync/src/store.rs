@@ -40,16 +40,27 @@ impl<'a, F> SnapStateStore<'a, F> {
     }
 
     /// Starts a clean generation after verifying the canonical state layout.
+    ///
+    /// Refuses to replace executed state or a completed snapshot. An unfinished generation may
+    /// be replaced when its pivot is no longer usable.
     pub fn begin_generation(&self, generation: SnapGeneration) -> Result<(), SnapSyncError>
     where
         F: DatabaseProviderFactory,
-        F::ProviderRW: DBProvider<Tx: DbTxMut> + StageCheckpointWriter + StorageSettingsCache,
+        F::ProviderRW: DBProvider<Tx: DbTxMut>
+            + StageCheckpointReader
+            + StageCheckpointWriter
+            + StorageSettingsCache,
     {
         generation.validate()?;
         generation.ensure_phase(SnapPhase::Accounts)?;
         let provider = self.factory.database_provider_rw().map_err(db_error)?;
         if !provider.cached_storage_settings().use_hashed_state() {
             return Err(SnapSyncError::UnsupportedStorageLayout)
+        }
+        // Check in the transaction that clears state, even when the caller checked before
+        // selecting a pivot. A completed bootstrap must never become a fresh generation.
+        if !Self::requires_bootstrap_in(&provider)? {
+            return Err(SnapSyncError::ExistingState)
         }
 
         let tx = provider.tx_ref();
@@ -424,6 +435,15 @@ where
     F: DatabaseProviderFactory,
     F::Provider: StageCheckpointReader,
 {
+    /// Returns whether the database is fresh or contains an unfinished snapshot.
+    ///
+    /// Completed snapshots and executed databases must use ordinary backfill. This does not
+    /// enable snap or check whether the chain and storage layout support it.
+    pub fn requires_bootstrap(&self) -> Result<bool, SnapSyncError> {
+        let provider = self.factory.database_provider_ro().map_err(db_error)?;
+        Self::requires_bootstrap_in(&provider)
+    }
+
     /// Returns the partial generation that must be resumed before state is served.
     pub fn interrupted_generation(&self) -> Result<Option<SnapGeneration>, SnapSyncError> {
         let provider = self.factory.database_provider_ro().map_err(db_error)?;
@@ -441,6 +461,27 @@ where
 }
 
 impl<F> SnapStateStore<'_, F> {
+    fn requires_bootstrap_in(provider: &impl StageCheckpointReader) -> Result<bool, SnapSyncError> {
+        if Self::completed_block_in(provider)?.is_some() {
+            return Ok(false)
+        }
+        // Execution may have committed state before Finish advances, including during an
+        // interrupted ordinary backfill. Genesis alone does not preclude snapshot bootstrap.
+        for stage in [StageId::Execution, StageId::Finish] {
+            if provider
+                .get_stage_checkpoint(stage)
+                .map_err(db_error)?
+                .is_some_and(|checkpoint| checkpoint.block_number > 0)
+            {
+                if Self::load_generation(provider)?.is_some() {
+                    return Err(SnapSyncError::ExistingState)
+                }
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    }
+
     // An accepted generation leaves its block behind with no resumable progress.
     pub(crate) fn completed_block_in(
         provider: &impl StageCheckpointReader,
@@ -675,6 +716,51 @@ mod tests {
     }
 
     #[test]
+    fn existing_state_cannot_be_replaced_by_a_generation() {
+        // Execution can be ahead of Finish after an interrupted ordinary backfill. A completed
+        // snapshot also has its own checkpoint, independent of subsequent pipeline progress.
+        for stage in [StageId::Execution, StageId::Finish, SNAP_SYNC_STAGE] {
+            let factory = create_test_provider_factory();
+            factory.set_storage_settings_cache(StorageSettings::v2());
+            let provider = factory.database_provider_rw().unwrap();
+            provider
+                .write_hashed_state(
+                    &HashedPostState::default()
+                        .with_accounts([(B256::ZERO, Some(account(7)))])
+                        .into_sorted(),
+                )
+                .unwrap();
+            provider.save_stage_checkpoint(stage, StageCheckpoint::new(42)).unwrap();
+            provider
+                .save_stage_checkpoint(StageId::MerkleExecute, StageCheckpoint::new(42))
+                .unwrap();
+            provider.commit().unwrap();
+
+            let store = SnapStateStore::new(&factory);
+            assert!(!store.requires_bootstrap().unwrap());
+            assert!(
+                matches!(store.begin_generation(generation()), Err(SnapSyncError::ExistingState)),
+                "stage: {stage}"
+            );
+
+            let provider = factory.database_provider_ro().unwrap();
+            assert_eq!(
+                provider.tx_ref().get::<tables::HashedAccounts>(B256::ZERO).unwrap(),
+                Some(account(7))
+            );
+            assert_eq!(
+                provider.get_stage_checkpoint(stage).unwrap(),
+                Some(StageCheckpoint::new(42))
+            );
+            assert_eq!(
+                provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap(),
+                Some(StageCheckpoint::new(42))
+            );
+            assert!(store.interrupted_generation().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn rejects_plain_state_before_clearing_hashed_state() {
         let factory = create_test_provider_factory();
         let provider = factory.database_provider_rw().unwrap();
@@ -697,11 +783,43 @@ mod tests {
     }
 
     #[test]
+    fn genesis_checkpoints_allow_bootstrap() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let provider = factory.database_provider_rw().unwrap();
+        for stage in [StageId::Execution, StageId::Finish] {
+            provider.save_stage_checkpoint(stage, StageCheckpoint::default()).unwrap();
+        }
+        provider.commit().unwrap();
+
+        let store = SnapStateStore::new(&factory);
+        assert!(store.requires_bootstrap().unwrap());
+        store.begin_generation(generation()).unwrap();
+        assert_eq!(store.interrupted_generation().unwrap(), Some(generation()));
+    }
+
+    #[test]
+    fn executed_state_with_an_unfinished_generation_is_rejected() {
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let store = SnapStateStore::new(&factory);
+        store.begin_generation(generation()).unwrap();
+        let provider = factory.database_provider_rw().unwrap();
+        provider.save_stage_checkpoint(StageId::Execution, StageCheckpoint::new(1)).unwrap();
+        provider.commit().unwrap();
+
+        assert!(matches!(store.requires_bootstrap(), Err(SnapSyncError::ExistingState)));
+        assert!(matches!(store.begin_generation(generation()), Err(SnapSyncError::ExistingState)));
+        assert_eq!(store.interrupted_generation().unwrap(), Some(generation()));
+    }
+
+    #[test]
     fn account_range_and_cursor_commit_together() {
         let factory = create_test_provider_factory();
         factory.set_storage_settings_cache(StorageSettings::v2());
         let store = SnapStateStore::new(&factory);
         let generation = generation();
+        assert!(store.requires_bootstrap().unwrap());
         store.begin_generation(generation).unwrap();
         let account_hash = B256::repeat_byte(3);
         let code = Bytes::from_static(&[0x60, 0x00]);
@@ -721,6 +839,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.interrupted_generation().unwrap(), Some(updated));
+        assert!(store.requires_bootstrap().unwrap());
         assert_eq!(updated.next_account, account_hash);
         let provider = factory.database_provider_ro().unwrap();
         assert_eq!(

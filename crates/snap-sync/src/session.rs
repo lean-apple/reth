@@ -71,6 +71,9 @@ impl<'a, C, F, X> SnapSyncSession<'a, C, F, X> {
 
     /// Runs until the state is validated or the context reports no further progress.
     ///
+    /// Returns [`SnapSyncError::ExistingState`] if bootstrap has already completed or ordinary
+    /// execution has populated the database. Such nodes must continue with ordinary backfill.
+    ///
     /// A pivot that leaves the canonical chain, or falls behind the block access list history
     /// peers serve, is abandoned and replaced by a fresh generation rather than failing the
     /// session. EIP-8189 also describes restoring an orphaned pivot from the fork's block access
@@ -86,6 +89,9 @@ impl<'a, C, F, X> SnapSyncSession<'a, C, F, X> {
         F::ProviderRW: SnapSyncProvider,
         X: SnapSyncContext,
     {
+        if !self.store.requires_bootstrap()? {
+            return Err(SnapSyncError::ExistingState)
+        }
         loop {
             let head = self.context.canonical_head()?;
             let generation = match self.resolve_generation(head)? {
@@ -516,6 +522,20 @@ mod tests {
         assert_eq!(
             provider.get_stage_checkpoint(StageId::MerkleExecute).unwrap().unwrap().block_number,
             1
+        );
+        drop(provider);
+
+        let error = SnapSyncSession::new(&client, &factory, context, Runtime::test())
+            .with_policy(policy())
+            .run()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SnapSyncError::ExistingState));
+        assert_eq!(store.completed_block().unwrap(), Some(1));
+        let provider = factory.database_provider_ro().unwrap();
+        assert_eq!(
+            provider.tx_ref().get::<tables::HashedAccounts>(account_hash).unwrap(),
+            Some(Account::from(account))
         );
     }
 
