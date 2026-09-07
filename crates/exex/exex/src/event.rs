@@ -10,4 +10,8 @@ pub enum ExExEvent {
     ///
     /// On reorgs, it's possible for the height to go down.
     FinishedHeight(BlockNumHash),
+    /// Releases consumed WAL through this height, capped by finality, without advancing pruning.
+    /// Persist the replay cursor and guarantee recovery from retained canonical history.
+    /// `FinishedHeight` resets this boundary; on reorgs, acknowledge a surviving canonical block.
+    WalReleaseHeight(BlockNumHash),
 }

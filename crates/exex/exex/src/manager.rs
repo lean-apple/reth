@@ -18,7 +18,6 @@ use std::{
     collections::VecDeque,
     fmt::Debug,
     future::{poll_fn, Future},
-    ops::Not,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -67,6 +66,10 @@ struct ExExMetrics {
     notifications_sent_total: Counter,
     /// The total number of events an `ExEx` has sent to the manager.
     events_sent_total: Counter,
+    /// Current block acknowledged as processed and safe to prune.
+    finished_height: Gauge,
+    /// Current notification boundary acknowledged as safe to release from the WAL.
+    wal_release_height: Gauge,
 }
 
 /// A handle to an `ExEx` used by the [`ExExManager`] to communicate with `ExEx`'s.
@@ -90,6 +93,8 @@ pub struct ExExHandle<N: NodePrimitives = EthPrimitives> {
     ///
     /// If this is `None`, the `ExEx` has not emitted a `FinishedHeight` event.
     finished_height: Option<BlockNumHash>,
+    /// WAL release boundary, updated by either acknowledgement event.
+    wal_release_height: Option<BlockNumHash>,
 }
 
 impl<N: NodePrimitives> ExExHandle<N> {
@@ -117,10 +122,32 @@ impl<N: NodePrimitives> ExExHandle<N> {
                 receiver: event_rx,
                 next_notification_id: 0,
                 finished_height: None,
+                wal_release_height: None,
             },
             event_tx,
             notifications,
         )
+    }
+
+    /// Drains acknowledgements and reports whether any were received.
+    fn poll_events(&mut self, cx: &mut Context<'_>) -> bool {
+        let mut received = false;
+        while let Poll::Ready(Some(event)) = self.receiver.poll_recv(cx) {
+            received = true;
+            debug!(target: "exex::manager", exex_id = %self.id, ?event, "Received event from ExEx");
+            self.metrics.events_sent_total.increment(1);
+            let height = match event {
+                ExExEvent::FinishedHeight(height) => {
+                    self.finished_height = Some(height);
+                    self.metrics.finished_height.set(height.number as f64);
+                    height
+                }
+                ExExEvent::WalReleaseHeight(height) => height,
+            };
+            self.wal_release_height = Some(height);
+            self.metrics.wal_release_height.set(height.number as f64);
+        }
+        received
     }
 
     /// Reserves a slot in the `PollSender` channel and sends the notification if the slot was
@@ -250,6 +277,8 @@ pub struct ExExManager<P, N: NodePrimitives> {
     wal: Wal<N>,
     /// A stream of finalized headers.
     finalized_header_stream: ForkChoiceStream<SealedHeader<N::BlockHeader>>,
+    /// Last observed finality, used when a release acknowledgement arrives after finality.
+    finalized_height: Option<BlockNumHash>,
     /// The threshold for the number of blocks in the WAL before emitting a warning.
     wal_blocks_warning: usize,
 
@@ -311,6 +340,7 @@ where
 
             wal,
             finalized_header_stream,
+            finalized_height: None,
             wal_blocks_warning: DEFAULT_WAL_BLOCKS_WARNING,
 
             handle: ExExManagerHandle {
@@ -367,72 +397,37 @@ where
     P: HeaderProvider,
     N: NodePrimitives,
 {
-    /// Finalizes the WAL according to the passed finalized header.
-    ///
-    /// This function checks if all ExExes are on the canonical chain and finalizes the WAL if
-    /// necessary.
-    fn finalize_wal(&self, finalized_header: SealedHeader<N::BlockHeader>) -> eyre::Result<()> {
-        debug!(target: "exex::manager", header = ?finalized_header.num_hash(), "Received finalized header");
-
-        // Check if all ExExes are on the canonical chain
-        let exex_finished_heights = self
-            .exex_handles
-            .iter()
-            // Get ID and finished height for each ExEx
-            .map(|exex_handle| (&exex_handle.id, exex_handle.finished_height))
-            // Deduplicate all hashes
-            .unique_by(|(_, num_hash)| num_hash.map(|num_hash| num_hash.hash))
-            // Check if hashes are canonical
-            .map(|(exex_id, num_hash)| {
-                num_hash.map_or(Ok((exex_id, num_hash, false)), |num_hash| {
-                    self.provider
-                        .is_known(num_hash.hash)
-                        // Save the ExEx ID, finished height, and whether the hash is canonical
-                        .map(|is_canonical| (exex_id, Some(num_hash), is_canonical))
-                })
-            })
-            // We collect here to be able to log the unfinalized ExExes below
-            .collect::<Result<Vec<_>, _>>()?;
-        if exex_finished_heights.iter().all(|(_, _, is_canonical)| *is_canonical) {
-            // If there is a finalized header and all ExExs are on the canonical chain, finalize
-            // the WAL with either the lowest finished height among all ExExes, or finalized header
-            // – whichever is lower.
-            let lowest_finished_height = exex_finished_heights
-                .iter()
-                .copied()
-                .filter_map(|(_, num_hash, _)| num_hash)
-                .chain([(finalized_header.num_hash())])
-                .min_by_key(|num_hash| num_hash.number)
-                .unwrap();
-
-            self.wal.finalize(lowest_finished_height)?;
-            if self.wal.num_blocks() > self.wal_blocks_warning {
-                warn!(
-                    target: "exex::manager",
-                    blocks = ?self.wal.num_blocks(),
-                    threshold = self.wal_blocks_warning,
-                    "WAL contains too many blocks and is not getting cleared. That will lead to increased disk space usage. Check that you emit the FinishedHeight event from your ExExes."
-                );
+    /// Releases WAL up to the lowest canonical acknowledgement, capped by finality.
+    fn finalize_wal(&self, finalized_height: BlockNumHash) -> eyre::Result<()> {
+        let mut release_height = finalized_height;
+        for exex in self.exex_handles.iter().unique_by(|exex| exex.wal_release_height) {
+            let Some(height) = exex.wal_release_height else {
+                debug!(target: "exex::manager", exex_id = %exex.id, "Waiting for WAL release acknowledgement");
+                return Ok(())
+            };
+            if !self
+                .provider
+                .sealed_header(height.number)?
+                .is_some_and(|header| header.hash() == height.hash)
+            {
+                debug!(target: "exex::manager", exex_id = %exex.id, ?height, "WAL release boundary is not canonical");
+                return Ok(())
             }
-        } else {
-            let unfinalized_exexes = exex_finished_heights
-                .into_iter()
-                .filter_map(|(exex_id, num_hash, is_canonical)| {
-                    is_canonical.not().then_some((exex_id, num_hash))
-                })
-                .format_with(", ", |(exex_id, num_hash), f| {
-                    f(&format_args!("{exex_id} = {num_hash:?}"))
-                })
-                // We need this because `debug!` uses the argument twice when formatting the final
-                // log message, but the result of `format_with` can only be used once
-                .to_string();
-            debug!(
-                target: "exex::manager",
-                %unfinalized_exexes,
-                "Not all ExExes are on the canonical chain, can't finalize the WAL"
-            );
+            if height.number < release_height.number {
+                release_height = height;
+            }
         }
 
+        self.wal.finalize(release_height)?;
+        let blocks = self.wal.num_blocks();
+        if blocks > self.wal_blocks_warning {
+            warn!(
+                target: "exex::manager",
+                blocks,
+                threshold = self.wal_blocks_warning,
+                "WAL contains too many blocks. Check ExEx FinishedHeight or WalReleaseHeight acknowledgements."
+            );
+        }
         Ok(())
     }
 }
@@ -446,7 +441,7 @@ where
 
     /// Main loop of the [`ExExManager`]. The order of operations is as follows:
     /// 1. Handle incoming ExEx events. We do it before finalizing the WAL, because it depends on
-    ///    the latest state of [`ExExEvent::FinishedHeight`] events.
+    ///    the latest processing and WAL-release acknowledgements.
     /// 2. Finalize the WAL with the finalized header, if necessary.
     /// 3. Drain [`ExExManagerHandle`] notifications, push them to the internal buffer and update
     ///    the internal buffer capacity.
@@ -458,24 +453,17 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        // Handle incoming ExEx events
+        let mut release_changed = false;
         for exex in &mut this.exex_handles {
-            while let Poll::Ready(Some(event)) = exex.receiver.poll_recv(cx) {
-                debug!(target: "exex::manager", exex_id = %exex.id, ?event, "Received event from ExEx");
-                exex.metrics.events_sent_total.increment(1);
-                match event {
-                    ExExEvent::FinishedHeight(height) => exex.finished_height = Some(height),
-                }
-            }
+            release_changed |= exex.poll_events(cx);
         }
 
-        // Drain the finalized header stream and finalize the WAL with the last header
-        let mut last_finalized_header = None;
-        while let Poll::Ready(finalized_header) = this.finalized_header_stream.poll_next_unpin(cx) {
-            last_finalized_header = finalized_header;
+        while let Poll::Ready(Some(header)) = this.finalized_header_stream.poll_next_unpin(cx) {
+            this.finalized_height = Some(header.num_hash());
+            release_changed = true;
         }
-        if let Some(header) = last_finalized_header {
-            this.finalize_wal(header)?;
+        if release_changed && let Some(height) = this.finalized_height {
+            this.finalize_wal(height)?;
         }
 
         // Drain handle notifications
@@ -680,15 +668,18 @@ impl<N: NodePrimitives> Clone for ExExManagerHandle<N> {
 mod tests {
     use super::*;
     use crate::wal::WalResult;
+    use alloy_consensus::Header;
     use alloy_primitives::B256;
     use futures::{StreamExt, TryStreamExt};
     use rand::Rng;
     use reth_db_common::init::init_genesis;
+    use reth_ethereum_primitives::Block;
     use reth_evm_ethereum::EthEvmConfig;
-    use reth_primitives_traits::RecoveredBlock;
+    use reth_primitives_traits::{Block as _, RecoveredBlock};
     use reth_provider::{
-        providers::BlockchainProvider, test_utils::create_test_provider_factory, BlockReader,
-        BlockWriter, Chain, DBProvider, DatabaseProviderFactory, TransactionVariant,
+        providers::BlockchainProvider,
+        test_utils::{create_test_provider_factory, MockEthProvider},
+        BlockReader, BlockWriter, Chain, DBProvider, DatabaseProviderFactory, TransactionVariant,
     };
     use reth_testing_utils::generators::{self, random_block, BlockParams};
 
@@ -1491,5 +1482,201 @@ mod tests {
             result.is_ok(),
             "Deadlock detected! Manager failed to wake up and process Pending Item #100."
         );
+    }
+
+    struct WalReleaseFixture {
+        manager: ExExManager<MockEthProvider, EthPrimitives>,
+        events: Vec<UnboundedSender<ExExEvent>>,
+        notifications: Vec<ExExNotifications<MockEthProvider, EthEvmConfig>>,
+        finalized: watch::Sender<Option<SealedHeader>>,
+        blocks: Vec<RecoveredBlock<Block>>,
+        directory: tempfile::TempDir,
+    }
+
+    impl WalReleaseFixture {
+        fn new(consumers: usize, block_count: u64) -> eyre::Result<Self> {
+            let provider = MockEthProvider::default();
+            let mut parent_hash = B256::ZERO;
+            let mut blocks = Vec::new();
+            for number in 0..=block_count {
+                let block = Block {
+                    header: Header { number, parent_hash, ..Default::default() },
+                    body: Default::default(),
+                };
+                let recovered = block.clone().try_into_recovered()?;
+                parent_hash = recovered.hash();
+                provider.add_block(parent_hash, block);
+                blocks.push(recovered);
+            }
+            let directory = tempfile::tempdir()?;
+            let wal = Wal::new(directory.path())?;
+            let mut handles = Vec::new();
+            let mut events = Vec::new();
+            let mut notifications = Vec::new();
+            for index in 0..consumers {
+                let (handle, sender, stream) = ExExHandle::new(
+                    format!("consumer_{index}"),
+                    blocks[0].num_hash(),
+                    provider.clone(),
+                    EthEvmConfig::mainnet(),
+                    wal.handle(),
+                );
+                handles.push(handle);
+                events.push(sender);
+                notifications.push(stream);
+            }
+            let (finalized, rx) = watch::channel(None);
+            let manager = ExExManager::new(provider, handles, 2, wal, ForkChoiceStream::new(rx));
+            Ok(Self { manager, events, notifications, finalized, blocks, directory })
+        }
+
+        fn poll(&mut self) -> eyre::Result<()> {
+            let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+            match Pin::new(&mut self.manager).poll(&mut cx) {
+                Poll::Pending => Ok(()),
+                Poll::Ready(result) => {
+                    result?;
+                    Err(eyre::eyre!("ExEx manager exited unexpectedly"))
+                }
+            }
+        }
+
+        fn event(&mut self, consumer: usize, event: ExExEvent) -> eyre::Result<()> {
+            self.events[consumer].send(event)?;
+            self.poll()
+        }
+
+        fn finalize(&mut self, number: usize) -> eyre::Result<()> {
+            self.finalized.send(Some(self.blocks[number].clone_sealed_header()))?;
+            self.poll()
+        }
+
+        fn deliver(&mut self, number: usize) -> eyre::Result<()> {
+            let notification = ExExNotification::ChainCommitted {
+                new: Arc::new(Chain::new(
+                    vec![self.blocks[number].clone()],
+                    Default::default(),
+                    Default::default(),
+                )),
+            };
+            self.manager
+                .handle()
+                .send(ExExNotificationSource::BlockchainTree, notification.clone())?;
+            self.poll()?;
+            let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+            for stream in &mut self.notifications {
+                assert_eq!(
+                    stream.try_poll_next_unpin(&mut cx)?,
+                    Poll::Ready(Some(notification.clone()))
+                );
+            }
+            self.poll()
+        }
+
+        fn pruning_height(&self) -> FinishedExExHeight {
+            *self.manager.handle().finished_height().borrow()
+        }
+    }
+
+    #[test]
+    fn deferred_release_bounds_wal_without_advancing_pruning() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(1, 128)?;
+        let durable = fixture.blocks[0].num_hash();
+        fixture.event(0, ExExEvent::FinishedHeight(durable))?;
+        for number in 1..fixture.blocks.len() {
+            fixture.deliver(number)?;
+            assert_eq!(fixture.manager.wal.num_blocks(), 1);
+            fixture.finalize(number)?;
+            assert_eq!(fixture.manager.wal.num_blocks(), 1);
+            fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[number].num_hash()))?;
+            assert_eq!(fixture.manager.wal.num_blocks(), 0);
+            assert_eq!(fixture.pruning_height(), FinishedExExHeight::Height(durable.number));
+        }
+        assert_eq!(Wal::<EthPrimitives>::new(fixture.directory.path())?.num_blocks(), 0);
+        // A released height must not make the manager filter unprocessed notifications.
+        fixture.deliver(1)?;
+        assert_eq!(fixture.manager.exex_handles[0].finished_height, Some(durable));
+        Ok(())
+    }
+
+    #[test]
+    fn release_without_finished_height_keeps_pruning_not_ready() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(1, 1)?;
+        fixture.deliver(1)?;
+        fixture.finalize(1)?;
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[1].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 0);
+        assert_eq!(fixture.pruning_height(), FinishedExExHeight::NotReady);
+        Ok(())
+    }
+
+    #[test]
+    fn release_waits_for_every_consumer_and_respects_legacy_progress() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(2, 2)?;
+        fixture.deliver(1)?;
+        fixture.deliver(2)?;
+        fixture.finalize(2)?;
+        fixture.event(0, ExExEvent::FinishedHeight(fixture.blocks[0].num_hash()))?;
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[2].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 2);
+        assert_eq!(fixture.pruning_height(), FinishedExExHeight::NotReady);
+        fixture.event(1, ExExEvent::FinishedHeight(fixture.blocks[1].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 1);
+        fixture.event(1, ExExEvent::FinishedHeight(fixture.blocks[2].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 0);
+        assert_eq!(fixture.pruning_height(), FinishedExExHeight::Height(0));
+        Ok(())
+    }
+
+    #[test]
+    fn release_is_capped_by_finality_and_can_move_backwards() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(1, 3)?;
+        fixture.event(0, ExExEvent::FinishedHeight(fixture.blocks[0].num_hash()))?;
+        for number in 1..=3 {
+            fixture.deliver(number)?;
+        }
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[3].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 3);
+        fixture.finalize(1)?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 2);
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[1].num_hash()))?;
+        fixture.finalize(3)?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 2);
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[3].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 0);
+        assert_eq!(fixture.pruning_height(), FinishedExExHeight::Height(0));
+        Ok(())
+    }
+
+    #[test]
+    fn release_rejects_unknown_or_mismatched_canonical_boundaries() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(1, 2)?;
+        fixture.deliver(1)?;
+        fixture.finalize(2)?;
+        fixture.event(0, ExExEvent::WalReleaseHeight(BlockNumHash::new(2, B256::ZERO)))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 1);
+        // The hash is known, but does not belong to the acknowledged canonical height.
+        fixture.event(
+            0,
+            ExExEvent::WalReleaseHeight(BlockNumHash::new(2, fixture.blocks[1].hash())),
+        )?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 1);
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[2].num_hash()))?;
+        assert_eq!(fixture.manager.wal.num_blocks(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn finished_height_updates_both_cursors_including_reverts() -> eyre::Result<()> {
+        let mut fixture = WalReleaseFixture::new(1, 2)?;
+        fixture.event(0, ExExEvent::WalReleaseHeight(fixture.blocks[2].num_hash()))?;
+        for number in [1, 2, 0] {
+            let height = fixture.blocks[number].num_hash();
+            fixture.event(0, ExExEvent::FinishedHeight(height))?;
+            assert_eq!(fixture.manager.exex_handles[0].finished_height, Some(height));
+            assert_eq!(fixture.manager.exex_handles[0].wal_release_height, Some(height));
+            assert_eq!(fixture.pruning_height(), FinishedExExHeight::Height(height.number));
+        }
+        Ok(())
     }
 }

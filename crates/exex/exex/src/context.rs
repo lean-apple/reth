@@ -135,6 +135,16 @@ where
     ) -> Result<(), SendError<BlockNumHash>> {
         self.events.send(ExExEvent::FinishedHeight(height)).map_err(|_| SendError(height))
     }
+
+    /// Sends [`ExExEvent::WalReleaseHeight`] without advancing processing or pruning.
+    /// # Errors
+    /// Returns an error if the ExEx task manager's channel is closed.
+    pub fn send_wal_release_height(
+        &self,
+        height: BlockNumHash,
+    ) -> Result<(), SendError<BlockNumHash>> {
+        self.events.send(ExExEvent::WalReleaseHeight(height)).map_err(|_| SendError(height))
+    }
 }
 
 #[cfg(test)]
