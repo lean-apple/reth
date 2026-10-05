@@ -673,6 +673,7 @@ mod tests {
             B256::ZERO,
             vec![stored_slot],
             None,
+            None,
         );
         provider.commit_storage_chunk(write, B256::ZERO, chunk).unwrap();
         let mut moved = accounts();
@@ -716,7 +717,14 @@ mod tests {
             .commit_storage_chunk(
                 write,
                 B256::ZERO,
-                StorageChunk::new(changed, contract.storage_root, B256::ZERO, vec![stale], None),
+                StorageChunk::new(
+                    changed,
+                    contract.storage_root,
+                    B256::ZERO,
+                    vec![stale],
+                    None,
+                    None,
+                ),
             )
             .unwrap();
 
@@ -727,7 +735,14 @@ mod tests {
             .commit_storage_chunk(
                 write,
                 B256::ZERO,
-                StorageChunk::new(later, contract.storage_root, B256::ZERO, vec![stale], None),
+                StorageChunk::new(
+                    later,
+                    contract.storage_root,
+                    B256::ZERO,
+                    vec![stale],
+                    None,
+                    None,
+                ),
             )
             .unwrap();
 

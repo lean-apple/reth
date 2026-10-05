@@ -799,7 +799,7 @@ mod tests {
         let leftover = HashedPostState::default().with_storages([(key(1), storage().1)]);
         provider.write_hashed_state(&leftover.into_sorted()).unwrap();
         let slots = vec![(SLOT, U256::from(7))];
-        let chunk = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, None);
+        let chunk = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, None, None);
         provider.commit_storage_chunk(write, B256::ZERO, chunk).unwrap();
 
         let coverage =
@@ -821,7 +821,7 @@ mod tests {
         let provider = factory.database_provider_rw().unwrap();
         let slots = vec![(SLOT, U256::from(7))];
         let next = Some(B256::repeat_byte(0x66));
-        let partial = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, next);
+        let partial = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, next, None);
         provider.commit_storage_chunk(write, B256::ZERO, partial).unwrap();
         let incomplete =
             provider.commit_account_range(write, &range, Default::default(), bytecodes.clone());
@@ -833,7 +833,7 @@ mod tests {
         // Complete, but not the storage the account commits to.
         let provider = factory.database_provider_rw().unwrap();
         let slots = vec![(SLOT, U256::from(8))];
-        let wrong = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, None);
+        let wrong = StorageChunk::new(key(2), storage().0, B256::ZERO, slots, None, None);
         provider.commit_storage_chunk(write, B256::ZERO, wrong).unwrap();
         let mismatched =
             provider.commit_account_range(write, &range, Default::default(), bytecodes);

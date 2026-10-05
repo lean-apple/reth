@@ -17,7 +17,7 @@ use reth_storage_api::{
     DBProvider, DatabaseProviderFactory, MetadataProvider, MetadataWriter, StateWriter,
 };
 use reth_tasks::Runtime;
-use std::fmt;
+use std::{fmt, iter};
 
 /// Default number of contracts asked for per storage request.
 pub const DEFAULT_STORAGE_ACCOUNTS: usize = 128;
@@ -112,7 +112,8 @@ where
                 return Ok(StorageRangeStep::Unavailable { peer_id })
             }
         };
-        let chunks = chunks(ranges, batch, from)?;
+        let previous = first.checked_sub(1).map(|index| contracts.accounts()[index].0);
+        let chunks = chunks(ranges, batch, from, previous)?;
         // One response's chunks commit together.
         let committed = self
             .context
@@ -206,28 +207,35 @@ pub enum StorageRangeStep {
 }
 
 // Splits a response into per-contract chunks. Only the last contract returned can be part way
-// through, and it continues where a follow-up request would resume.
+// through, and it continues where a follow-up request would resume. `previous` is the range's
+// contract before the batch.
 fn chunks(
     ranges: VerifiedStorageRanges,
     batch: VerifiedAccountBatch<'_>,
     from: B256,
+    previous: Option<B256>,
 ) -> Result<Vec<StorageChunk>, SnapSyncError> {
-    let roots: Vec<B256> =
-        batch.accounts().iter().map(|(_, account)| account.storage_root).collect();
+    // Each contract's root, with the contract before it.
+    let contracts: Vec<_> = batch
+        .accounts()
+        .iter()
+        .map(|(_, account)| account.storage_root)
+        .zip(iter::once(previous).chain(batch.accounts().iter().map(|(account, _)| Some(*account))))
+        .collect();
     let resume = ranges.follow_up(0, batch)?.map(|(request, _)| {
         (request.account_hashes[0], request.starting_hash.unwrap_or(B256::ZERO))
     });
     Ok(ranges
         .into_ranges()
         .into_iter()
-        .zip(roots)
+        .zip(contracts)
         .enumerate()
-        .map(|(index, (range, storage_root))| {
+        .map(|(index, (range, (storage_root, previous)))| {
             // Contracts after the first are requested whole.
             let from = if index == 0 { from } else { B256::ZERO };
             let next =
                 resume.filter(|(account, _)| *account == range.account_hash).map(|(_, slot)| slot);
-            StorageChunk::new(range.account_hash, storage_root, from, range.slots, next)
+            StorageChunk::new(range.account_hash, storage_root, from, range.slots, next, previous)
         })
         .collect())
 }

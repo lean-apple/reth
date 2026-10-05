@@ -55,18 +55,24 @@ pub struct StorageChunk {
     slots: Vec<(B256, U256)>,
     // Slot the storage continues at, or none once the trie is exhausted.
     next: Option<B256>,
+    // Contract before this one in the range, which must be complete first.
+    previous: Option<B256>,
 }
 
 impl StorageChunk {
     /// Creates a chunk of `account`'s storage requested from `from` and continuing at `next`.
+    ///
+    /// `previous` is the range's contract before `account`, so a response completing out of order
+    /// is refused instead of marking the contracts it skipped complete.
     pub const fn new(
         account: B256,
         storage_root: B256,
         from: B256,
         slots: Vec<(B256, U256)>,
         next: Option<B256>,
+        previous: Option<B256>,
     ) -> Self {
-        Self { account, storage_root, from, slots, next }
+        Self { account, storage_root, from, slots, next, previous }
     }
 }
 
@@ -152,10 +158,10 @@ impl StorageProgress {
     // A contract carried across a pivot move does not block others: the new root can hold
     // contracts before it, or no longer hold it at all.
     fn advance(mut self, chunk: &StorageChunk) -> Result<Self, SnapSyncError> {
-        let blocked = self
-            .partial
-            .iter()
-            .any(|partial| partial.account < chunk.account && partial.storage_root.is_some());
+        let blocked = chunk.previous.is_some_and(|previous| !self.is_complete(previous)) ||
+            self.partial.iter().any(|partial| {
+                partial.account < chunk.account && partial.storage_root.is_some()
+            });
         if blocked || self.resume_at(chunk.account) != Some(chunk.from) {
             return Err(SnapSyncError::OutOfOrderStorage {
                 account: chunk.account,
@@ -339,7 +345,7 @@ mod tests {
 
     // `slots()[served]` requested from `from`, continuing at `next`.
     fn chunk(served: Range<usize>, from: B256, next: Option<B256>) -> StorageChunk {
-        StorageChunk::new(CONTRACT, root(), from, slots()[served].to_vec(), next)
+        StorageChunk::new(CONTRACT, root(), from, slots()[served].to_vec(), next, None)
     }
 
     // An attempt whose account coverage has not reached the contract yet.
@@ -389,7 +395,7 @@ mod tests {
             // Restarted, skipping ahead, or another contract while this one is part way through.
             chunk(0..1, B256::ZERO, Some(slot(2))),
             chunk(2..3, slot(3), None),
-            StorageChunk::new(B256::repeat_byte(0x44), root(), B256::ZERO, slots(), None),
+            StorageChunk::new(B256::repeat_byte(0x44), root(), B256::ZERO, slots(), None, None),
         ];
         for chunk in refused {
             assert!(matches!(
@@ -408,6 +414,7 @@ mod tests {
             slot(2),
             slots()[1..].to_vec(),
             None,
+            None,
         );
         assert!(matches!(
             provider.commit_storage_chunk(write, B256::ZERO, other_root),
@@ -416,6 +423,31 @@ mod tests {
 
         assert_eq!(provider.storage_progress(write, B256::ZERO).unwrap(), progress);
         assert_eq!(stored_slots(&provider, CONTRACT), slots()[..1]);
+    }
+
+    #[test]
+    fn a_contract_completing_before_the_one_ahead_of_it_is_refused() {
+        let (factory, write) = started();
+        let earlier = B256::repeat_byte(0x11);
+        let whole = |account, previous| {
+            StorageChunk::new(account, root(), B256::ZERO, slots(), None, previous)
+        };
+        let provider = factory.database_provider_rw().unwrap();
+        // A response for the later contract landing first would mark the earlier one complete.
+        assert!(matches!(
+            provider.commit_storage_chunk(write, B256::ZERO, whole(CONTRACT, Some(earlier))),
+            Err(SnapSyncError::OutOfOrderStorage { .. })
+        ));
+        assert_eq!(provider.storage_progress(write, B256::ZERO).unwrap(), StorageProgress::START);
+        assert!(stored_slots(&provider, CONTRACT).is_empty());
+
+        provider.commit_storage_chunk(write, B256::ZERO, whole(earlier, None)).unwrap();
+        let progress = provider
+            .commit_storage_chunk(write, B256::ZERO, whole(CONTRACT, Some(earlier)))
+            .unwrap();
+        assert!(progress.is_complete(earlier) && progress.is_complete(CONTRACT));
+        assert_eq!(stored_slots(&provider, earlier), slots());
+        assert_eq!(stored_slots(&provider, CONTRACT), slots());
     }
 
     #[test]
@@ -446,7 +478,7 @@ mod tests {
 
     // Whole storage of `account`, proved against `root()`.
     fn whole(account: B256) -> StorageChunk {
-        StorageChunk::new(account, root(), B256::ZERO, slots(), None)
+        StorageChunk::new(account, root(), B256::ZERO, slots(), None, None)
     }
 
     #[test]
@@ -468,6 +500,7 @@ mod tests {
             B256::repeat_byte(0x33),
             slot(2),
             slots()[1..].to_vec(),
+            None,
             None,
         );
         let progress = provider.commit_storage_chunk(advanced, B256::ZERO, rest).unwrap();
@@ -498,8 +531,14 @@ mod tests {
         let (factory, _, advanced) = carried();
         let provider = factory.database_provider_rw().unwrap();
         let before = B256::repeat_byte(0x11);
-        let first =
-            StorageChunk::new(before, root(), B256::ZERO, slots()[..1].to_vec(), Some(slot(2)));
+        let first = StorageChunk::new(
+            before,
+            root(),
+            B256::ZERO,
+            slots()[..1].to_vec(),
+            Some(slot(2)),
+            None,
+        );
         provider.commit_storage_chunk(advanced, B256::ZERO, first).unwrap();
 
         // Both stay resumable, even across another pivot move.
@@ -509,7 +548,7 @@ mod tests {
         assert_eq!(progress.resume_at(before), Some(slot(2)));
         assert_eq!(progress.resume_at(CONTRACT), Some(slot(2)));
 
-        let rest = StorageChunk::new(before, root(), slot(2), slots()[1..].to_vec(), None);
+        let rest = StorageChunk::new(before, root(), slot(2), slots()[1..].to_vec(), None, None);
         let progress = provider.commit_storage_chunk(advanced, B256::ZERO, rest).unwrap();
         assert!(progress.is_complete(before));
         assert_eq!(progress.resume_at(CONTRACT), Some(slot(2)));
@@ -535,7 +574,8 @@ mod tests {
         let provider = factory.database_provider_rw().unwrap();
 
         let ahead = provider.commit_storage_chunk(write, slot(9), chunk(0..3, B256::ZERO, None));
-        let empty = StorageChunk::new(CONTRACT, EMPTY_ROOT_HASH, B256::ZERO, Vec::new(), None);
+        let empty =
+            StorageChunk::new(CONTRACT, EMPTY_ROOT_HASH, B256::ZERO, Vec::new(), None, None);
         let empty = provider.commit_storage_chunk(write, B256::ZERO, empty);
 
         assert!(matches!(ahead, Err(SnapSyncError::OutOfOrderRange { .. })));

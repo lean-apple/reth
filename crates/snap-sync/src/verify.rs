@@ -444,7 +444,7 @@ mod tests {
         let origin = provider.account_coverage(write).unwrap().unwrap().next().unwrap();
         let root = accounts()[2].1.storage_root;
         let chunk =
-            StorageChunk::new(CONTRACT, root, B256::ZERO, vec![(SLOT, U256::from(7))], None);
+            StorageChunk::new(CONTRACT, root, B256::ZERO, vec![(SLOT, U256::from(7))], None, None);
         provider.commit_storage_chunk(write, origin, chunk).unwrap();
 
         assert!(matches!(start(&provider, write), Err(SnapSyncError::IncompleteAccounts { .. })));
