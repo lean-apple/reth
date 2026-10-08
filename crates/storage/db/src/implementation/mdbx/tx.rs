@@ -355,9 +355,10 @@ impl<K: TransactionKind> DbTx for Tx<K> {
 
     fn contains_key<T: Table>(&self, key: T::Key) -> Result<bool, DatabaseError> {
         self.execute_with_operation_metric::<T, _>(Operation::Get, None, |tx| {
-            // Unit decoding ignores the MDBX value pointer, including dirty pages in a writer.
-            tx.get::<()>(self.get_dbi::<T>()?, key.encode().as_ref())
-                .map(|value| value.is_some())
+            // Skips the value, so large values do not fault in their first page.
+            tx.cursor_with_dbi(self.get_dbi::<T>()?)
+                .map_err(|error| DatabaseError::InitCursor(error.into()))?
+                .contains_key(key.encode().as_ref())
                 .map_err(|error| DatabaseError::Read(error.into()))
         })
     }
@@ -469,11 +470,7 @@ mod tests {
     };
     use reth_libmdbx::MaxReadTransactionDuration;
     use reth_storage_errors::db::DatabaseError;
-    use std::{
-        sync::atomic::Ordering,
-        thread::sleep,
-        time::{Duration, Instant},
-    };
+    use std::{sync::atomic::Ordering, thread::sleep, time::Duration};
     use tempfile::tempdir;
 
     #[test]
@@ -563,38 +560,5 @@ mod tests {
         .unwrap();
         assert!(tx.contains_key::<tables::HeaderNumbers>(hash).unwrap());
         assert!(!tx.contains_key::<tables::HeaderNumbers>(B256::ZERO).unwrap());
-    }
-
-    #[test]
-    #[ignore = "manual performance measurement"]
-    fn bytecode_presence_latency_measurement() {
-        let db = create_test_rw_db();
-        let hash = B256::with_last_byte(1);
-        let bytes = 32 * 1024;
-        let tx = db.tx_mut().unwrap();
-        DbTxMut::put::<RawTable<tables::Bytecodes>>(
-            &tx,
-            RawKey::new(hash),
-            RawValue::from_vec(vec![7; bytes]),
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        let tx = db.tx().unwrap();
-        let iterations = 100_000;
-        for copy in [true, false] {
-            let start = Instant::now();
-            for _ in 0..iterations {
-                let present = if copy {
-                    tx.get::<RawTable<tables::Bytecodes>>(RawKey::new(hash)).unwrap().is_some()
-                } else {
-                    tx.contains_key::<tables::Bytecodes>(hash).unwrap()
-                };
-                assert!(std::hint::black_box(present));
-            }
-            println!(
-                "bytecode_presence copy={copy} bytes={bytes} lookups={iterations} elapsed_us={}",
-                start.elapsed().as_micros()
-            );
-        }
     }
 }
