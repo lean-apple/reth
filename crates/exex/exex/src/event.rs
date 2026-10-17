@@ -10,4 +10,8 @@ pub enum ExExEvent {
     ///
     /// On reorgs, it's possible for the height to go down.
     FinishedHeight(BlockNumHash),
+    /// Lets the WAL be released through the finalized block while pruning still waits for
+    /// [`ExExEvent::FinishedHeight`]. Released notifications are never replayed, so the `ExEx`
+    /// must resume from a canonical head and rebuild unprocessed blocks from retained history.
+    ReleaseFinalizedWal,
 }

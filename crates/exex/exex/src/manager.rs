@@ -90,6 +90,8 @@ pub struct ExExHandle<N: NodePrimitives = EthPrimitives> {
     ///
     /// If this is `None`, the `ExEx` has not emitted a `FinishedHeight` event.
     finished_height: Option<BlockNumHash>,
+    /// Whether the `ExEx` sent [`ExExEvent::ReleaseFinalizedWal`].
+    releases_finalized_wal: bool,
 }
 
 impl<N: NodePrimitives> ExExHandle<N> {
@@ -117,6 +119,7 @@ impl<N: NodePrimitives> ExExHandle<N> {
                 receiver: event_rx,
                 next_notification_id: 0,
                 finished_height: None,
+                releases_finalized_wal: false,
             },
             event_tx,
             notifications,
@@ -378,6 +381,8 @@ where
         let exex_finished_heights = self
             .exex_handles
             .iter()
+            // ExExes that rebuild from canonical history never need non-finalized WAL
+            .filter(|exex_handle| !exex_handle.releases_finalized_wal)
             // Get ID and finished height for each ExEx
             .map(|exex_handle| (&exex_handle.id, exex_handle.finished_height))
             // Deduplicate all hashes
@@ -465,6 +470,7 @@ where
                 exex.metrics.events_sent_total.increment(1);
                 match event {
                     ExExEvent::FinishedHeight(height) => exex.finished_height = Some(height),
+                    ExExEvent::ReleaseFinalizedWal => exex.releases_finalized_wal = true,
                 }
             }
         }
@@ -1415,6 +1421,81 @@ mod tests {
         assert!(exex_manager.as_mut().poll(&mut cx).is_pending());
         // WAL is finalized
         assert_eq!(exex_manager.wal.iter_notifications()?.next().transpose()?, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_exex_wal_release_finalized() -> eyre::Result<()> {
+        let mut rng = generators::rng();
+
+        let provider_factory = create_test_provider_factory();
+        let genesis_hash = init_genesis(&provider_factory)?;
+        let genesis_block = provider_factory
+            .sealed_block_with_senders(genesis_hash.into(), TransactionVariant::NoHash)?
+            .ok_or_else(|| eyre::eyre!("genesis block not found"))?;
+        let block = random_block(
+            &mut rng,
+            genesis_block.number + 1,
+            BlockParams { parent: Some(genesis_hash), ..Default::default() },
+        )
+        .try_recover()?;
+        let provider_rw = provider_factory.database_provider_rw()?;
+        provider_rw.insert_block(&block)?;
+        provider_rw.commit()?;
+        let provider = BlockchainProvider::new(provider_factory)?;
+
+        let temp_dir = tempfile::tempdir()?;
+        let wal = Wal::new(temp_dir.path())?;
+        let (releasing, releasing_events, _releasing_notifications) = ExExHandle::new(
+            "releasing".to_string(),
+            Default::default(),
+            provider.clone(),
+            EthEvmConfig::mainnet(),
+            wal.handle(),
+        );
+        let (legacy, legacy_events, _legacy_notifications) = ExExHandle::new(
+            "legacy".to_string(),
+            Default::default(),
+            provider.clone(),
+            EthEvmConfig::mainnet(),
+            wal.handle(),
+        );
+
+        let (finalized_headers_tx, rx) = watch::channel(None);
+        let mut exex_manager = std::pin::pin!(ExExManager::new(
+            provider,
+            vec![releasing, legacy],
+            2,
+            wal,
+            ForkChoiceStream::new(rx)
+        ));
+        let finished_height = exex_manager.handle().finished_height();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+
+        let notification = ExExNotification::ChainCommitted {
+            new: Arc::new(Chain::new(vec![block.clone()], Default::default(), Default::default())),
+        };
+        exex_manager.handle().send(ExExNotificationSource::BlockchainTree, notification.clone())?;
+        releasing_events.send(ExExEvent::ReleaseFinalizedWal)?;
+        finalized_headers_tx.send(Some(block.clone_sealed_header()))?;
+        assert!(exex_manager.as_mut().poll(&mut cx)?.is_pending());
+        // The legacy ExEx has not finished any block, so it still holds the WAL
+        assert_eq!(
+            exex_manager.wal.iter_notifications()?.collect::<WalResult<Vec<_>>>()?,
+            std::slice::from_ref(&notification)
+        );
+
+        legacy_events.send(ExExEvent::FinishedHeight(block.num_hash()))?;
+        finalized_headers_tx.send(Some(block.clone_sealed_header()))?;
+        assert!(exex_manager.as_mut().poll(&mut cx)?.is_pending());
+        assert_eq!(exex_manager.wal.iter_notifications()?.next().transpose()?, None);
+        // Releasing the WAL grants no pruning permission
+        assert_eq!(*finished_height.borrow(), FinishedExExHeight::NotReady);
+
+        releasing_events.send(ExExEvent::FinishedHeight(genesis_block.num_hash()))?;
+        assert!(exex_manager.as_mut().poll(&mut cx)?.is_pending());
+        assert_eq!(*finished_height.borrow(), FinishedExExHeight::Height(genesis_block.number));
 
         Ok(())
     }
