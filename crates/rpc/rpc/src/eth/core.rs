@@ -569,14 +569,15 @@ mod tests {
         test_utils::{ExtendedAccount, MockEthProvider, NoopProvider},
         PruneCheckpointReader, StageCheckpointReader,
     };
+    use reth_revm::{database::StateProviderDatabase, db::State};
     use reth_rpc_eth_api::{
-        helpers::{EthBlocks, EthCall, SpawnBlocking},
+        helpers::{estimate::EstimateCall, EthBlocks, EthCall, LoadState, SpawnBlocking},
         node::RpcNodeCoreAdapter,
         EthApiServer,
     };
     use reth_rpc_eth_types::RpcInvalidTransactionError;
     use reth_storage_api::{
-        BalProvider, BlockReaderIdExt, NodePrimitivesProvider, StateProviderFactory,
+        BalProvider, BlockReaderIdExt, NodePrimitivesProvider, StateProvider, StateProviderFactory,
     };
     use reth_tasks::cancel::is_cancelled;
     use reth_testing_utils::generators;
@@ -1317,6 +1318,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(estimated, U256::from(21_000));
+    }
+
+    #[tokio::test]
+    async fn prepared_estimate_leaves_prepared_state_reusable() {
+        // Revert unless GAS > 60_000, so the estimate depends on the overridden code.
+        let code = Bytes::from_static(&[
+            0x5a, 0x61, 0xea, 0x60, 0x10, 0x60, 0x0d, 0x57, 0x60, 0x00, 0x60, 0x00, 0xfd, 0x5b,
+            0x00,
+        ]);
+        let sender = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0xaa);
+        let mut state_override = StateOverride::default();
+        state_override.insert(contract, AccountOverride { code: Some(code), ..Default::default() });
+        let overrides = EvmOverrides::state(Some(state_override));
+        let request = TransactionRequest::default().with_from(sender).with_to(contract);
+
+        let provider = MockEthProvider::default();
+        provider.add_account(sender, ExtendedAccount::new(0, U256::MAX));
+        provider.add_block(
+            B256::repeat_byte(0x42),
+            Block {
+                header: Header { number: 1, gas_limit: 30_000_000, ..Default::default() },
+                body: BlockBody::default(),
+            },
+        );
+        let api = build_test_eth_api(provider);
+        let expected =
+            EthCall::estimate_gas_at(&api, request.clone(), BlockId::latest(), overrides.clone())
+                .await
+                .unwrap();
+
+        let (evm_env, at) = api.evm_env_at(BlockId::latest()).await.unwrap();
+        let estimates = api
+            .spawn_blocking_io_with_state(at, move |this, state| {
+                let (gas_limit, gas_price) = (request.gas, request.gas_price);
+                let mut db = State::builder()
+                    .with_database(StateProviderDatabase::new(state.into_evm_state_provider()))
+                    .build();
+                let (evm_env, tx_env) =
+                    this.prepare_estimate_env(evm_env, request, &mut db, overrides)?;
+                let first = this.estimate_gas_prepared(
+                    evm_env.clone(),
+                    tx_env.clone(),
+                    &mut db,
+                    gas_limit,
+                    gas_price,
+                )?;
+                let second =
+                    this.estimate_gas_prepared(evm_env, tx_env, &mut db, gas_limit, gas_price)?;
+                Ok([first, second])
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(estimates, [expected; 2]);
     }
 
     #[tokio::test]

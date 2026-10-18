@@ -1,8 +1,8 @@
 //! Estimate gas needed implementation
 
 use super::{Call, LoadPendingBlock};
-use crate::{AsEthApiError, FromEthApiError, IntoEthApiError};
-use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
+use crate::{AsEthApiError, IntoEthApiError};
+use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, OverrideBlockHashes};
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{TxKind, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, BlockId};
@@ -31,7 +31,7 @@ use reth_tasks::cancel::is_cancelled;
 use revm::{
     context::Block,
     context_interface::{result::ExecutionResult, Cfg, Transaction},
-    Database as _,
+    DatabaseCommit,
 };
 use tracing::trace;
 
@@ -51,13 +51,44 @@ pub trait EstimateCall: Call {
     ///  - `nonce` is set to `None`
     fn estimate_gas_with<S>(
         &self,
-        mut evm_env: EvmEnvFor<Self::Evm>,
-        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        evm_env: EvmEnvFor<Self::Evm>,
+        request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
         state: S,
         overrides: EvmOverrides,
     ) -> Result<U256, Self::Error>
     where
         S: EvmStateProvider,
+    {
+        // Keep a copy of gas related request values
+        let tx_request_gas_limit = request.as_ref().gas_limit();
+        let tx_request_gas_price = request.as_ref().gas_price();
+
+        // Configure the evm env
+        let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
+        let (evm_env, tx_env) = self.prepare_estimate_env(evm_env, request, &mut db, overrides)?;
+
+        self.estimate_gas_prepared(
+            evm_env,
+            tx_env,
+            &mut db,
+            tx_request_gas_limit,
+            tx_request_gas_price,
+        )
+    }
+
+    /// Prepares the EVM and transaction environment [`Self::estimate_gas_with`] estimates with,
+    /// applying its EVM settings and the `overrides` to `db`.
+    #[expect(clippy::type_complexity)]
+    fn prepare_estimate_env<DB>(
+        &self,
+        mut evm_env: EvmEnvFor<Self::Evm>,
+        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        db: &mut DB,
+        overrides: EvmOverrides,
+    ) -> Result<(EvmEnvFor<Self::Evm>, TxEnvFor<Self::Evm>), Self::Error>
+    where
+        DB: Database + DatabaseCommit + OverrideBlockHashes,
+        EthApiError: From<DB::Error>,
     {
         // Disabled because eth_estimateGas is sometimes used with eoa senders
         // See <https://github.com/paradigmxyz/reth/issues/1959>
@@ -75,26 +106,41 @@ pub trait EstimateCall: Call {
         // set nonce to None so that the correct nonce is chosen by the EVM
         request.as_mut().take_nonce();
 
-        // Keep a copy of gas related request values
-        let tx_request_gas_limit = request.as_ref().gas_limit();
-        let tx_request_gas_price = request.as_ref().gas_price();
-
-        // Configure the evm env
-        let mut db = State::builder().with_database(StateProviderDatabase::new(state)).build();
-
         // Apply any block overrides before deriving block-derived limits and the tx env so
         // overrides for `gasLimit`, `baseFee` and `blobBaseFee` are visible to estimation.
         // Mirrors geth's behavior, see:
         // <https://github.com/ethereum/go-ethereum/pull/30695>
         if let Some(block_overrides) = overrides.block {
-            apply_block_overrides(*block_overrides, &mut db, evm_env.block_env.inner_mut());
+            apply_block_overrides(*block_overrides, db, evm_env.block_env.inner_mut());
         }
 
         // Apply any state overrides if specified.
         if let Some(state_override) = overrides.state {
-            apply_state_overrides(state_override, &mut db).map_err(Self::Error::from_eth_err)?;
+            apply_state_overrides(state_override, db)
+                .map_err(EthApiError::from_state_overrides_err)?;
         }
 
+        let tx_env = self.create_txn_env(&evm_env, request, &mut *db)?;
+        Ok((evm_env, tx_env))
+    }
+
+    /// Estimates the gas of a transaction prepared by [`Self::prepare_estimate_env`] against `db`,
+    /// without committing any execution to it.
+    ///
+    /// `tx_request_gas_limit` and `tx_request_gas_price` are the request's own values. When either
+    /// is set, a failing transaction is retried at the maximum gas limit to tell whether it failed
+    /// for lack of gas.
+    fn estimate_gas_prepared<DB>(
+        &self,
+        evm_env: EvmEnvFor<Self::Evm>,
+        mut tx_env: TxEnvFor<Self::Evm>,
+        db: &mut DB,
+        tx_request_gas_limit: Option<u64>,
+        tx_request_gas_price: Option<u128>,
+    ) -> Result<U256, Self::Error>
+    where
+        DB: Database<Error = EvmDatabaseError<ProviderError>>,
+    {
         // the gas limit of the corresponding block
         let block_gas_limit = evm_env.block_env.gas_limit();
         // If EIP-8037 is enabled, the transaction gas limit cap is not applicable
@@ -112,8 +158,6 @@ pub trait EstimateCall: Call {
 
         let mut highest_gas_limit =
             tx_request_gas_limit.unwrap_or(max_gas_limit).min(max_gas_limit);
-
-        let mut tx_env = self.create_txn_env(&evm_env, request, &mut db)?;
 
         // Check whether this is a basic transfer: empty input to an account without bytecode.
         let is_basic_transfer = if tx_env.input().is_empty() &&
@@ -136,14 +180,14 @@ pub trait EstimateCall: Call {
         if tx_env.gas_price() > 0 {
             // cap the highest gas limit by max gas caller can afford with given gas price
             highest_gas_limit =
-                highest_gas_limit.min(self.caller_gas_allowance(&mut db, &evm_env, &tx_env)?);
+                highest_gas_limit.min(self.caller_gas_allowance(&mut *db, &evm_env, &tx_env)?);
         }
 
         // If the provided gas limit is less than computed cap, use that
         tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
 
         // Create EVM instance once and reuse it throughout the entire estimation process
-        let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
+        let mut evm = self.evm_config().evm_with_env(db, evm_env);
 
         // For basic transfers, try 21_000 gas before running the full binary search.
         if is_basic_transfer {
