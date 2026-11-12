@@ -38,17 +38,17 @@ pub struct MethodSink {
     /// Channel sender.
     tx: mpsc::Sender<String>,
     /// Max response size in bytes for a executed call.
-    max_response_size: u32,
+    max_response_size: usize,
 }
 
 impl MethodSink {
     /// Create a new `MethodSink` with unlimited response size.
     pub fn new(tx: mpsc::Sender<String>) -> Self {
-        MethodSink { tx, max_response_size: u32::MAX }
+        MethodSink { tx, max_response_size: usize::MAX }
     }
 
     /// Create a new `MethodSink` with a limited response size.
-    pub fn new_with_limit(tx: mpsc::Sender<String>, max_response_size: u32) -> Self {
+    pub fn new_with_limit(tx: mpsc::Sender<String>, max_response_size: usize) -> Self {
         MethodSink { tx, max_response_size }
     }
 
@@ -67,7 +67,7 @@ impl MethodSink {
     }
 
     /// Get the max response size.
-    pub const fn max_response_size(&self) -> u32 {
+    pub const fn max_response_size(&self) -> usize {
         self.max_response_size
     }
 

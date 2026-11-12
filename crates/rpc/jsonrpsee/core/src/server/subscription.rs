@@ -273,7 +273,7 @@ impl PendingSubscriptionSink {
         let response = MethodResponse::subscription_response(
             self.id,
             ResponsePayload::success_borrowed(&sink.uniq_sub.sub_id),
-            sink.inner.max_response_size() as usize,
+            sink.inner.max_response_size(),
         );
         let success = response.is_success();
 
@@ -462,13 +462,13 @@ impl Drop for SubscriptionSink {
 #[derive(Debug, Clone)]
 pub struct BoundedSubscriptions {
     guard: Arc<Semaphore>,
-    max: u32,
+    max: usize,
 }
 
 impl BoundedSubscriptions {
     /// Create a new bounded subscription.
-    pub fn new(max_subscriptions: u32) -> Self {
-        Self { guard: Arc::new(Semaphore::new(max_subscriptions as usize)), max: max_subscriptions }
+    pub fn new(max_subscriptions: usize) -> Self {
+        Self { guard: Arc::new(Semaphore::new(max_subscriptions)), max: max_subscriptions }
     }
 
     /// Attempts to acquire a subscription slot.
@@ -479,7 +479,7 @@ impl BoundedSubscriptions {
     }
 
     /// Get the maximum number of permitted subscriptions.
-    pub const fn max(&self) -> u32 {
+    pub const fn max(&self) -> usize {
         self.max
     }
 }

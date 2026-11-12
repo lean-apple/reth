@@ -71,7 +71,7 @@ use tower::{layer::util::Identity, Layer, Service};
 use tracing::{instrument, Instrument};
 
 /// Default maximum connections allowed.
-const MAX_CONNECTIONS: u32 = 100;
+const MAX_CONNECTIONS: usize = 100;
 
 type Notif<'a> = Option<std::borrow::Cow<'a, JsonRawValue>>;
 
@@ -138,7 +138,7 @@ where
     }
 
     async fn start_inner(self, methods: Methods, stop_handle: StopHandle) {
-        let connection_guard = ConnectionGuard::new(self.server_cfg.max_connections as usize);
+        let connection_guard = ConnectionGuard::new(self.server_cfg.max_connections);
         let listener = self.listener;
 
         let stopped = stop_handle.clone().shutdown();
@@ -188,13 +188,13 @@ where
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Maximum size in bytes of a request.
-    pub(crate) max_request_body_size: u32,
+    pub(crate) max_request_body_size: usize,
     /// Maximum size in bytes of a response.
-    pub(crate) max_response_body_size: u32,
+    pub(crate) max_response_body_size: usize,
     /// Maximum number of incoming connections allowed.
-    pub(crate) max_connections: u32,
+    pub(crate) max_connections: usize,
     /// Maximum number of subscriptions per connection.
-    pub(crate) max_subscriptions_per_connection: u32,
+    pub(crate) max_subscriptions_per_connection: usize,
     /// Whether batch requests are supported by this server or not.
     pub(crate) batch_requests_config: BatchRequestConfig,
     /// Custom tokio runtime to run the server on.
@@ -204,7 +204,7 @@ pub struct ServerConfig {
     /// Enable WS.
     pub(crate) enable_ws: bool,
     /// Number of messages that server is allowed to `buffer` until backpressure kicks in.
-    pub(crate) message_buffer_capacity: u32,
+    pub(crate) message_buffer_capacity: usize,
     /// ID provider.
     pub(crate) id_provider: Arc<dyn IdProvider>,
     /// Timeout for receiving the first request of a connection.
@@ -269,8 +269,8 @@ impl ServerConfig {
 impl Default for ServerConfigBuilder {
     fn default() -> Self {
         Self(ServerConfig {
-            max_request_body_size: TEN_MB_SIZE_BYTES,
-            max_response_body_size: TEN_MB_SIZE_BYTES,
+            max_request_body_size: TEN_MB_SIZE_BYTES as usize,
+            max_response_body_size: TEN_MB_SIZE_BYTES as usize,
             max_connections: MAX_CONNECTIONS,
             max_subscriptions_per_connection: 1024,
             batch_requests_config: BatchRequestConfig::Unlimited,
@@ -293,25 +293,25 @@ impl ServerConfigBuilder {
 
     /// Set the maximum size of a request body in bytes. Default is 10 MiB.
     pub fn max_request_body_size(mut self, size: u32) -> Self {
-        self.0.max_request_body_size = size;
+        self.0.max_request_body_size = size as usize;
         self
     }
 
     /// Set the maximum size of a response body in bytes. Default is 10 MiB.
     pub fn max_response_body_size(mut self, size: u32) -> Self {
-        self.0.max_response_body_size = size;
+        self.0.max_response_body_size = size as usize;
         self
     }
 
     /// Set the maximum number of connections allowed. Default is 100.
     pub fn max_connections(mut self, max: u32) -> Self {
-        self.0.max_connections = max;
+        self.0.max_connections = max as usize;
         self
     }
 
     /// Set the maximum number of subscriptions per connection. Default is 1024.
     pub fn max_subscriptions_per_connection(mut self, max: u32) -> Self {
-        self.0.max_subscriptions_per_connection = max;
+        self.0.max_subscriptions_per_connection = max as usize;
         self
     }
 
@@ -376,7 +376,7 @@ impl ServerConfigBuilder {
     /// Panics if the buffer capacity is 0.
     pub fn set_message_buffer_capacity(mut self, c: u32) -> Self {
         assert!(c > 0, "buffer capacity must be set to > 0");
-        self.0.message_buffer_capacity = c;
+        self.0.message_buffer_capacity = c as usize;
         self
     }
 
@@ -692,7 +692,7 @@ where
 
             let response = match server.receive_request(&request) {
                 Ok(response) => {
-                    let (tx, rx) = mpsc::channel(this.server_cfg.message_buffer_capacity as usize);
+                    let (tx, rx) = mpsc::channel(this.server_cfg.message_buffer_capacity);
                     let sink =
                         MethodSink::new_with_limit(tx, this.server_cfg.max_response_body_size);
 
@@ -703,7 +703,7 @@ where
 
                     let rpc_service = RpcService::new(
                         this.methods.clone(),
-                        this.server_cfg.max_response_body_size as usize,
+                        this.server_cfg.max_response_body_size,
                         this.conn_id.into(),
                         BoundedSubscriptions::new(this.server_cfg.max_subscriptions_per_connection),
                         sink.clone(),
@@ -726,7 +726,7 @@ where
 
                             let stream = BufReader::new(BufWriter::new(io.compat()));
                             let mut ws_builder = server.into_builder(stream);
-                            ws_builder.set_max_message_size(this.server_cfg.max_request_body_size as usize);
+                            ws_builder.set_max_message_size(this.server_cfg.max_request_body_size);
                             let (sender, receiver) = ws_builder.finish();
 
                             let params = BackgroundTaskParams {
@@ -764,7 +764,7 @@ where
 
             let rpc_service = self.rpc_middleware.service(RpcService::without_subscriptions(
                 methods,
-                max_response_size as usize,
+                max_response_size,
                 this.conn_id.into(),
             ));
 

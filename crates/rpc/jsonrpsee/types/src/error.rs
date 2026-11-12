@@ -276,7 +276,7 @@ impl serde::Serialize for ErrorCode {
 
 /// Helper to get a `JSON-RPC` error object when the maximum number of subscriptions have been
 /// exceeded.
-pub fn reject_too_many_subscriptions(limit: u32) -> ErrorObjectOwned {
+pub fn reject_too_many_subscriptions(limit: usize) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         TOO_MANY_SUBSCRIPTIONS_CODE,
         TOO_MANY_SUBSCRIPTIONS_MSG,
@@ -285,7 +285,7 @@ pub fn reject_too_many_subscriptions(limit: u32) -> ErrorObjectOwned {
 }
 
 /// Helper to get a `JSON-RPC` error object when the maximum request size limit have been exceeded.
-pub fn reject_too_big_request(limit: u32) -> ErrorObjectOwned {
+pub fn reject_too_big_request(limit: usize) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         OVERSIZED_REQUEST_CODE,
         OVERSIZED_REQUEST_MSG,

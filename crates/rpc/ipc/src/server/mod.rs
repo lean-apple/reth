@@ -186,7 +186,7 @@ where
         // signal that we're ready to accept connections
         on_ready.send(Ok(())).ok();
 
-        let connection_guard = ConnectionGuard::new(self.cfg.max_connections as usize);
+        let connection_guard = ConnectionGuard::new(self.cfg.max_connections);
 
         let stopped = stop_handle.clone().shutdown();
         let mut stopped = pin!(stopped);
@@ -344,7 +344,7 @@ where
         let conn = self.inner.conn_permit.clone();
         let rpc_service = self.rpc_middleware.service(RpcService::new(
             self.inner.methods.clone(),
-            self.inner.server_cfg.max_response_body_size as usize,
+            self.inner.server_cfg.max_response_body_size,
             self.inner.conn_id.into(),
             self.inner.bounded_subscriptions.clone(),
             self.inner.method_sink.clone(),
@@ -360,7 +360,7 @@ where
         // The connection drops its pending calls when it closes, so the call must not outlive the
         // returned future, otherwise it keeps running without anyone waiting for the response.
         let f = AbortOnDropHandle::new(tokio::task::spawn(async move {
-            let rp = if request.len() > max_request_body_size as usize {
+            let rp = if request.len() > max_request_body_size {
                 MethodResponse::error(Id::Null, reject_too_big_request(max_request_body_size))
             } else {
                 let is_single = request.chars().find_map(|c| match c {
@@ -424,8 +424,7 @@ where
         local_socket_stream,
     } = params;
 
-    let codec =
-        StreamCodec::stream_incoming().with_max_length(server_cfg.max_request_body_size as usize);
+    let codec = StreamCodec::stream_incoming().with_max_length(server_cfg.max_request_body_size);
     let ipc = IpcConn(tokio_util::codec::Decoder::framed(codec, local_socket_stream));
 
     let (tx, rx) = mpsc::channel::<String>(MESSAGE_BUFFER_CAPACITY);
@@ -481,13 +480,13 @@ async fn to_ipc_service<S, T>(
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Maximum size in bytes of a request.
-    max_request_body_size: u32,
+    max_request_body_size: usize,
     /// Maximum size in bytes of a response.
-    max_response_body_size: u32,
+    max_response_body_size: usize,
     /// Maximum number of incoming connections allowed.
-    max_connections: u32,
+    max_connections: usize,
     /// Maximum number of subscriptions per connection.
-    max_subscriptions_per_connection: u32,
+    max_subscriptions_per_connection: usize,
     /// Custom tokio runtime to run the server on.
     tokio_runtime: Option<tokio::runtime::Handle>,
     /// The permissions to create the IPC socket with.
@@ -497,8 +496,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            max_request_body_size: TEN_MB_SIZE_BYTES,
-            max_response_body_size: TEN_MB_SIZE_BYTES,
+            max_request_body_size: TEN_MB_SIZE_BYTES as usize,
+            max_response_body_size: TEN_MB_SIZE_BYTES as usize,
             max_connections: 100,
             max_subscriptions_per_connection: 1024,
             tokio_runtime: None,
@@ -529,25 +528,25 @@ impl Default for Builder<Identity> {
 impl<RpcMiddleware> Builder<RpcMiddleware> {
     /// Set the maximum size of a request body in bytes. Default is 10 MiB.
     pub const fn max_request_body_size(mut self, size: u32) -> Self {
-        self.settings.max_request_body_size = size;
+        self.settings.max_request_body_size = size as usize;
         self
     }
 
     /// Set the maximum size of a response body in bytes. Default is 10 MiB.
     pub const fn max_response_body_size(mut self, size: u32) -> Self {
-        self.settings.max_response_body_size = size;
+        self.settings.max_response_body_size = size as usize;
         self
     }
 
     /// Set the maximum number of connections allowed. Default is 100.
     pub const fn max_connections(mut self, max: u32) -> Self {
-        self.settings.max_connections = max;
+        self.settings.max_connections = max as usize;
         self
     }
 
     /// Set the maximum number of subscriptions per connection. Default is 1024.
     pub const fn max_subscriptions_per_connection(mut self, max: u32) -> Self {
-        self.settings.max_subscriptions_per_connection = max;
+        self.settings.max_subscriptions_per_connection = max as usize;
         self
     }
 

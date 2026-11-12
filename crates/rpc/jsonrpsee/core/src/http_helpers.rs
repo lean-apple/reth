@@ -134,7 +134,7 @@ pub enum HttpError {
 pub async fn read_body<B>(
     headers: &http::HeaderMap,
     body: B,
-    max_body_size: u32,
+    max_body_size: usize,
 ) -> Result<(Vec<u8>, bool), HttpError>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -144,7 +144,7 @@ where
     // NOTE(niklasad1): Values bigger than `u32::MAX` will be turned into zero here. This is
     // unlikely to occur in practice and in that case we fallback to allocating in the
     // while-loop below instead of pre-allocating.
-    let body_size = read_header_content_length(headers).unwrap_or(0);
+    let body_size = read_header_content_length(headers).unwrap_or(0) as usize;
 
     if body_size > max_body_size {
         return Err(HttpError::TooLarge);
@@ -152,9 +152,8 @@ where
 
     futures_util::pin_mut!(body);
 
-    let mut received_data =
-        Vec::with_capacity(std::cmp::min(body_size as usize, MAX_BODY_PREALLOCATION));
-    let mut limited_body = Limited::new(body, max_body_size as usize);
+    let mut received_data = Vec::with_capacity(std::cmp::min(body_size, MAX_BODY_PREALLOCATION));
+    let mut limited_body = Limited::new(body, max_body_size);
 
     let mut is_single = None;
 

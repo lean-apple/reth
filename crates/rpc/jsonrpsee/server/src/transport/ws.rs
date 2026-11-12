@@ -99,7 +99,7 @@ where
 
     tokio::pin!(ws_stream);
 
-    let call_permits = Arc::new(Semaphore::new(message_buffer_capacity as usize));
+    let call_permits = Arc::new(Semaphore::new(message_buffer_capacity));
 
     let result = loop {
         let receive = tokio::select! {
