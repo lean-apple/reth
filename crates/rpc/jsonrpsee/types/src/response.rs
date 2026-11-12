@@ -26,7 +26,7 @@
 
 //! Types pertaining to JSON-RPC responses.
 
-use std::{borrow::Cow as StdCow, fmt, marker::PhantomData};
+use std::{borrow::Cow as StdCow, fmt};
 
 use crate::{
     error::ErrorCode,
@@ -34,7 +34,7 @@ use crate::{
     request::Notification,
     ErrorObject, ErrorObjectOwned,
 };
-use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 
 /// JSON-RPC response object as defined in the [spec](https://www.jsonrpc.org/specification#response_object).
 pub struct Response<'a, T: Clone> {
@@ -77,31 +77,6 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&serde_json::to_string(&self).expect("valid JSON; qed"))
-    }
-}
-
-/// JSON-RPC response object as defined in the [spec](https://www.jsonrpc.org/specification#response_object)
-/// but differs from [`Response`] as it only represent a successful response.
-#[derive(Debug)]
-pub struct Success<'a, T> {
-    /// JSON-RPC version.
-    pub jsonrpc: Option<TwoPointZero>,
-    /// Result.
-    pub result: T,
-    /// Request ID
-    pub id: Id<'a>,
-}
-
-impl<'a, T: Clone> TryFrom<Response<'a, T>> for Success<'a, T> {
-    type Error = ErrorObjectOwned;
-
-    fn try_from(rp: Response<'a, T>) -> Result<Self, Self::Error> {
-        match rp.payload {
-            ResponsePayload::Error(e) => Err(e.into_owned()),
-            ResponsePayload::Success(r) => {
-                Ok(Success { jsonrpc: rp.jsonrpc, result: r.into_owned(), id: rp.id })
-            }
-        }
     }
 }
 
@@ -187,145 +162,6 @@ impl<'a, T: Clone> From<ErrorCode> for ResponsePayload<'a, T> {
     }
 }
 
-impl<'de, T> Deserialize<'de> for Response<'de, T>
-where
-    T: Deserialize<'de> + Clone,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: Deserialize<'de> + Clone,
-    {
-        #[derive(Debug)]
-        enum Field {
-            Jsonrpc,
-            Result,
-            Error,
-            Id,
-            Ignore,
-        }
-
-        impl<'de> Deserialize<'de> for Field {
-            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                struct FieldVisitor;
-
-                impl serde::de::Visitor<'_> for FieldVisitor {
-                    type Value = Field;
-
-                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                        formatter.write_str("`jsonrpc`, `result`, `error` and `id`")
-                    }
-
-                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
-                    where
-                        E: serde::de::Error,
-                    {
-                        match value {
-                            "jsonrpc" => Ok(Field::Jsonrpc),
-                            "result" => Ok(Field::Result),
-                            "error" => Ok(Field::Error),
-                            "id" => Ok(Field::Id),
-                            _ => Ok(Field::Ignore),
-                        }
-                    }
-                }
-                deserializer.deserialize_identifier(FieldVisitor)
-            }
-        }
-
-        struct Visitor<T>(PhantomData<T>);
-
-        impl<T> Visitor<T> {
-            fn new() -> Visitor<T> {
-                Visitor(PhantomData)
-            }
-        }
-
-        impl<'de, T> serde::de::Visitor<'de> for Visitor<T>
-        where
-            T: Deserialize<'de> + Clone + 'de,
-        {
-            type Value = Response<'de, T>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct Response")
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
-            where
-                V: serde::de::MapAccess<'de>,
-            {
-                let mut jsonrpc = None;
-                let mut result = None;
-                let mut error = None;
-                let mut id = None;
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Result => {
-                            if result.is_some() {
-                                return Err(serde::de::Error::duplicate_field("result"));
-                            }
-                            result = Some(map.next_value()?);
-                        }
-                        Field::Error => {
-                            if error.is_some() {
-                                return Err(serde::de::Error::duplicate_field("error"));
-                            }
-                            error = Some(map.next_value()?);
-                        }
-                        Field::Id => {
-                            if id.is_some() {
-                                return Err(serde::de::Error::duplicate_field("id"));
-                            }
-                            id = Some(map.next_value()?);
-                        }
-                        Field::Jsonrpc => {
-                            if jsonrpc.is_some() {
-                                return Err(serde::de::Error::duplicate_field("jsonrpc"));
-                            }
-                            jsonrpc = Some(map.next_value()?);
-                        }
-                        Field::Ignore => {
-                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
-                        }
-                    }
-                }
-
-                let id = id.ok_or_else(|| serde::de::Error::missing_field("id"))?;
-
-                let response = match (jsonrpc, result, error) {
-                    (_, Some(_), Some(_)) => {
-                        return Err(serde::de::Error::duplicate_field(
-                            "result and error are mutually exclusive",
-                        ));
-                    }
-                    (Some(jsonrpc), Some(result), None) => {
-                        Response { jsonrpc, payload: ResponsePayload::Success(result), id }
-                    }
-                    (Some(jsonrpc), None, Some(err)) => {
-                        Response { jsonrpc, payload: ResponsePayload::Error(err), id }
-                    }
-                    (None, Some(result), _) => {
-                        Response { jsonrpc: None, payload: ResponsePayload::Success(result), id }
-                    }
-                    (None, _, Some(err)) => {
-                        Response { jsonrpc: None, payload: ResponsePayload::Error(err), id }
-                    }
-                    (_, None, None) => return Err(serde::de::Error::missing_field("result/error")),
-                };
-
-                Ok(response)
-            }
-        }
-
-        const FIELDS: &[&str] = &["jsonrpc", "result", "error", "id"];
-        deserializer.deserialize_struct("Response", FIELDS, Visitor::new())
-    }
-}
-
 impl<T> Serialize for Response<'_, T>
 where
     T: Serialize + Clone,
@@ -391,63 +227,5 @@ mod tests {
         .unwrap();
         let exp = r#"{"id":1,"result":"ok"}"#;
         assert_eq!(ser, exp);
-    }
-
-    #[test]
-    fn deserialize_success_call() {
-        let exp = Response {
-            jsonrpc: Some(TwoPointZero),
-            payload: ResponsePayload::success(99_u64),
-            id: Id::Number(11),
-        };
-        let dsr: Response<u64> =
-            serde_json::from_str(r#"{"jsonrpc":"2.0", "result":99, "id":11}"#).unwrap();
-        assert_eq!(dsr.jsonrpc, exp.jsonrpc);
-        assert_eq!(dsr.payload, exp.payload);
-        assert_eq!(dsr.id, exp.id);
-    }
-
-    #[test]
-    fn deserialize_err_call() {
-        let exp = Response {
-            jsonrpc: Some(TwoPointZero),
-            payload: ResponsePayload::error(ErrorObjectOwned::owned(1, "lo", None::<()>)),
-            id: Id::Number(11),
-        };
-        let dsr: Response<()> =
-            serde_json::from_str(r#"{"jsonrpc":"2.0","error":{"code":1,"message":"lo"},"id":11}"#)
-                .unwrap();
-        assert_eq!(dsr.jsonrpc, exp.jsonrpc);
-        assert_eq!(dsr.payload, exp.payload);
-        assert_eq!(dsr.id, exp.id);
-    }
-
-    #[test]
-    fn deserialize_call_missing_version_field() {
-        let exp = Response {
-            jsonrpc: None,
-            payload: ResponsePayload::success(99_u64),
-            id: Id::Number(11),
-        };
-        let dsr: Response<u64> =
-            serde_json::from_str(r#"{"jsonrpc":null, "result":99, "id":11}"#).unwrap();
-        assert_eq!(dsr.jsonrpc, exp.jsonrpc);
-        assert_eq!(dsr.payload, exp.payload);
-        assert_eq!(dsr.id, exp.id);
-    }
-
-    #[test]
-    fn deserialize_with_unknown_field() {
-        let exp = Response {
-            jsonrpc: None,
-            payload: ResponsePayload::success(99_u64),
-            id: Id::Number(11),
-        };
-        let dsr: Response<u64> =
-            serde_json::from_str(r#"{"jsonrpc":null, "result":99, "id":11, "unknown":11}"#)
-                .unwrap();
-        assert_eq!(dsr.jsonrpc, exp.jsonrpc);
-        assert_eq!(dsr.payload, exp.payload);
-        assert_eq!(dsr.id, exp.id);
     }
 }

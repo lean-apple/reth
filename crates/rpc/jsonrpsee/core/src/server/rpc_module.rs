@@ -217,7 +217,6 @@ impl Methods {
     /// #[tokio::main]
     /// async fn main() {
     ///     use jsonrpsee::{RpcModule, SubscriptionMessage};
-    ///     use jsonrpsee::types::{response::Success, Response};
     ///     use jsonrpsee::core::to_json_raw_value;
     ///     use futures_util::StreamExt;
     ///
@@ -232,11 +231,12 @@ impl Methods {
     ///         Ok(())
     ///     }).unwrap();
     ///     let (resp, mut stream) = module.raw_json_request(r#"{"jsonrpc":"2.0","method":"hi","id":0}"#, 1).await.unwrap();
-    ///     // If the response is an error converting it to `Success` will fail.
-    ///     let resp: Success<u64> = serde_json::from_str::<Response<u64>>(&resp).unwrap().try_into().unwrap();
+    ///     // An error response has no `result`.
+    ///     let resp: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    ///     let sub_id = resp["result"].as_u64().unwrap();
     ///     let sub_resp = stream.recv().await.unwrap();
     ///     assert_eq!(
-    ///         format!(r#"{{"jsonrpc":"2.0","method":"hi","params":{{"subscription":{},"result":"one answer"}}}}"#, resp.result),
+    ///         format!(r#"{{"jsonrpc":"2.0","method":"hi","params":{{"subscription":{},"result":"one answer"}}}}"#, sub_id),
     ///         sub_resp
     ///     );
     /// }

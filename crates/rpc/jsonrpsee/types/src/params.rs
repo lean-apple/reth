@@ -35,7 +35,6 @@ use serde::{
     ser::Serializer,
     Deserialize, Serialize,
 };
-use serde_json::Value as JsonValue;
 
 use crate::{
     error::{ErrorCode, INVALID_PARAMS_MSG},
@@ -266,15 +265,6 @@ pub enum SubscriptionId<'a> {
     Str(Cow<'a, str>),
 }
 
-impl From<SubscriptionId<'_>> for JsonValue {
-    fn from(sub_id: SubscriptionId) -> Self {
-        match sub_id {
-            SubscriptionId::Num(n) => n.into(),
-            SubscriptionId::Str(s) => s.into_owned().into(),
-        }
-    }
-}
-
 impl From<u64> for SubscriptionId<'_> {
     fn from(sub_id: u64) -> Self {
         Self::Num(sub_id)
@@ -284,24 +274,6 @@ impl From<u64> for SubscriptionId<'_> {
 impl From<String> for SubscriptionId<'_> {
     fn from(sub_id: String) -> Self {
         Self::Str(sub_id.into())
-    }
-}
-
-impl<'a> TryFrom<JsonValue> for SubscriptionId<'a> {
-    type Error = ();
-
-    fn try_from(json: JsonValue) -> Result<SubscriptionId<'a>, ()> {
-        match json {
-            JsonValue::String(s) => Ok(SubscriptionId::Str(s.into())),
-            JsonValue::Number(n) => {
-                if let Some(n) = n.as_u64() {
-                    Ok(SubscriptionId::Num(n))
-                } else {
-                    Err(())
-                }
-            }
-            _ => Err(()),
-        }
     }
 }
 
@@ -471,9 +443,10 @@ fn invalid_params(e: impl ToString) -> ErrorObjectOwned {
 
 #[cfg(test)]
 mod test {
-    use super::{Cow, Id, JsonValue, Params, SubscriptionId, TwoPointZero};
+    use super::{Cow, Id, Params, SubscriptionId, TwoPointZero};
     use crate::response::SubscriptionPayload;
     use serde::Deserialize;
+    use serde_json::Value as JsonValue;
 
     #[test]
     fn id_deserialization() {

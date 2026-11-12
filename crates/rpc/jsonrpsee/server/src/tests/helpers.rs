@@ -11,7 +11,8 @@ use crate::{RpcModule, ServerBuilder, ServerHandle};
 
 use jsonrpsee_core::{DeserializeOwned, RpcResult, SubscriptionError};
 use jsonrpsee_test_utils::TimeoutFutureExt;
-use jsonrpsee_types::{error::ErrorCode, ErrorObject, ErrorObjectOwned, Response, ResponseSuccess};
+use jsonrpsee_types::{error::ErrorCode, ErrorObject, ErrorObjectOwned};
+use serde::Deserialize;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 pub(crate) struct TestContext;
@@ -208,9 +209,13 @@ pub(crate) fn init_logger() {
     let _ = FmtSubscriber::builder().with_env_filter(EnvFilter::from_default_env()).try_init();
 }
 
-pub(crate) fn deser_call<T: DeserializeOwned + fmt::Debug + Clone>(raw: String) -> T {
-    let rp: Response<T> = serde_json::from_str(&raw).unwrap();
-    ResponseSuccess::try_from(rp).expect("Successful call").result
+pub(crate) fn deser_call<T: DeserializeOwned>(raw: String) -> T {
+    #[derive(Deserialize)]
+    struct Success<T> {
+        result: T,
+    }
+
+    serde_json::from_str::<Success<T>>(&raw).expect("Successful call").result
 }
 
 /// Applications can/should provide their own error.
