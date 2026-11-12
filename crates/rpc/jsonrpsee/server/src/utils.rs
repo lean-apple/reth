@@ -111,13 +111,13 @@ where
 
 /// Notifies `request_received` whenever hyper passes a request to the service.
 #[derive(Debug, Clone)]
-pub(crate) struct NotifyOnRequest<S> {
+struct NotifyOnRequest<S> {
     service: S,
     request_received: Arc<Notify>,
 }
 
 impl<S> NotifyOnRequest<S> {
-    pub(crate) fn new(service: S, request_received: Arc<Notify>) -> Self {
+    fn new(service: S, request_received: Arc<Notify>) -> Self {
         Self { service, request_received }
     }
 }
@@ -137,10 +137,7 @@ where
 }
 
 /// Resolves with an error if no request was received within `timeout`, otherwise never.
-pub(crate) async fn no_request_within(
-    request_received: &Notify,
-    timeout: Option<Duration>,
-) -> BoxError {
+async fn no_request_within(request_received: &Notify, timeout: Option<Duration>) -> BoxError {
     if let Some(timeout) = timeout &&
         tokio::time::timeout(timeout, request_received.notified()).await.is_err()
     {
@@ -171,11 +168,35 @@ where
     B::Error: Into<BoxError>,
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    let request_received = Arc::new(Notify::new());
-    let service = NotifyOnRequest::new(
+    serve_connection(
+        io,
         hyper_util::service::TowerToHyperService::new(service),
-        request_received.clone(),
-    );
+        stopped,
+        Some(DEFAULT_FIRST_REQUEST_TIMEOUT),
+    )
+    .await
+}
+
+/// Serves `service` over `io` until the connection completes, shutting it down gracefully once
+/// `stopped` resolves.
+///
+/// The connection is closed if it sends no request within `first_request_timeout`.
+pub(crate) async fn serve_connection<S, B, I>(
+    io: I,
+    service: S,
+    stopped: impl Future<Output = ()>,
+    first_request_timeout: Option<Duration>,
+) -> Result<(), BoxError>
+where
+    S: hyper::service::Service<http::Request<hyper::body::Incoming>, Response = http::Response<B>>,
+    S::Future: Send + 'static,
+    S::Error: Into<BoxError>,
+    B: http_body::Body<Data = hyper::body::Bytes> + Send + 'static,
+    B::Error: Into<BoxError>,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let request_received = Arc::new(Notify::new());
+    let service = NotifyOnRequest::new(service, request_received.clone());
     let io = TokioIo::new(io);
 
     let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -192,7 +213,7 @@ where
             conn.as_mut().graceful_shutdown();
             conn.await
         }
-        err = no_request_within(&request_received, Some(DEFAULT_FIRST_REQUEST_TIMEOUT)) => Err(err),
+        err = no_request_within(&request_received, first_request_timeout) => Err(err),
     }
 }
 

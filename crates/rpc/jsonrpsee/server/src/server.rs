@@ -31,8 +31,8 @@ use crate::{
     middleware::rpc::{catch_call_panic, RpcService},
     transport::{http, ws, ws::BackgroundTaskParams},
     utils::{
-        accept_error_backoff, deserialize_notification, no_request_within, NotifyOnRequest,
-        PermitBody, WriteTimeoutIo, DEFAULT_FIRST_REQUEST_TIMEOUT, DEFAULT_WRITE_TIMEOUT,
+        accept_error_backoff, deserialize_notification, serve_connection, PermitBody,
+        TowerToHyperService, WriteTimeoutIo, DEFAULT_FIRST_REQUEST_TIMEOUT, DEFAULT_WRITE_TIMEOUT,
     },
     HttpBody, HttpRequest, HttpResponse, LOG_TARGET,
 };
@@ -42,7 +42,7 @@ use futures_util::{
     io::{BufReader, BufWriter},
 };
 use hyper::body::Bytes;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
 use jsonrpsee_core::{
     id_providers::RandomIntegerIdProvider,
     middleware::{Batch, BatchEntry, BatchEntryErr, RpcServiceBuilder, RpcServiceT},
@@ -64,7 +64,7 @@ use serde::de::{DeserializeSeed, Deserializer, Error as _, SeqAccess, Visitor};
 use soketto::handshake::http::is_upgrade_request;
 use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::{mpsc, watch, Notify, OwnedSemaphorePermit},
+    sync::{mpsc, watch, OwnedSemaphorePermit},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tower::{layer::util::Identity, Layer, Service};
@@ -848,29 +848,11 @@ fn process_connection<RpcMiddleware, HttpMiddleware, Body>(
     let service = http_middleware.service(tower_service);
 
     tokio::spawn(async move {
-        let request_received = Arc::new(Notify::new());
         // this requires Clone.
-        let service = NotifyOnRequest::new(
-            crate::utils::TowerToHyperService::new(service),
-            request_received.clone(),
-        );
-        let io = TokioIo::new(WriteTimeoutIo::new(socket, write_timeout));
-        let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        let conn = builder.serve_connection_with_upgrades(io, service);
-        let stopped = stop_handle.shutdown();
-
-        tokio::pin!(stopped, conn);
-
-        let res = tokio::select! {
-            res = &mut conn => res,
-            _ = &mut stopped => {
-                // NOTE: the connection should continue to be polled until shutdown can finish.
-                // Thus, both lines below are needed and not a nit.
-                conn.as_mut().graceful_shutdown();
-                conn.await
-            }
-            err = no_request_within(&request_received, first_request_timeout) => Err(err),
-        };
+        let service = TowerToHyperService::new(service);
+        let io = WriteTimeoutIo::new(socket, write_timeout);
+        let res =
+            serve_connection(io, service, stop_handle.shutdown(), first_request_timeout).await;
 
         if let Err(e) = res {
             tracing::debug!(target: LOG_TARGET, "HTTP serve connection failed {:?}", e);
