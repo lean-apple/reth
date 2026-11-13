@@ -221,6 +221,30 @@ pub struct PendingSubscriptionSink {
 }
 
 impl PendingSubscriptionSink {
+    /// Creates the sink of the subscribe call `id`, and the receiver of the answer to that call.
+    pub(crate) fn new(
+        id: &Id<'_>,
+        method: &'static str,
+        inner: MethodSink,
+        subscribers: Subscribers,
+        conn: SubscriptionState<'_>,
+    ) -> (Self, oneshot::Receiver<MethodResponse>) {
+        let uniq_sub =
+            SubscriptionKey { conn_id: conn.conn_id, sub_id: conn.id_provider.next_id() };
+        let (subscribe, subscribed) = oneshot::channel();
+        let sink = Self {
+            inner,
+            method,
+            subscribers,
+            uniq_sub,
+            id: id.clone().into_owned(),
+            subscribe,
+            permit: conn.subscription_permit,
+        };
+
+        (sink, subscribed)
+    }
+
     /// Reject the subscription by responding to the subscription method call with
     /// the error message from [`jsonrpsee_types::error::ErrorObject`].
     ///

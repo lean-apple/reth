@@ -38,6 +38,7 @@ use std::{
 use crate::{
     error::RegisterMethodError,
     id_providers::RandomIntegerIdProvider,
+    middleware::ResponseFuture,
     server::{
         helpers::MethodSink,
         subscription::{
@@ -50,7 +51,7 @@ use crate::{
 };
 use futures_util::{future::BoxFuture, FutureExt};
 use jsonrpsee_types::{
-    error::{ErrorCode, ErrorObject},
+    error::{ErrorCode, ErrorObject, ErrorObjectOwned},
     Id, Params, Request, SubscriptionId as RpcSubscriptionId,
 };
 use rustc_hash::FxHashMap;
@@ -131,6 +132,38 @@ pub enum MethodCallback {
     Subscription(SubscriptionMethod<'static>),
     /// Unsubscription method handler.
     Unsubscription(UnsubscriptionMethod),
+}
+
+impl MethodCallback {
+    /// Runs the callback and returns its response.
+    ///
+    /// `subscribe` is only called for a subscription method. It returns the sink and the state of
+    /// the new subscription, or the error the subscribe call is answered with.
+    pub fn call<'a>(
+        &self,
+        id: Id<'_>,
+        params: Params<'_>,
+        conn_id: ConnectionId,
+        max_response_size: MaxResponseSize,
+        subscribe: impl FnOnce() -> Result<(MethodSink, SubscriptionState<'a>), ErrorObjectOwned>,
+    ) -> ResponseFuture<BoxFuture<'static, MethodResponse>, MethodResponse> {
+        match self {
+            Self::Sync(callback) => ResponseFuture::ready(callback(id, params, max_response_size)),
+            Self::Async(callback) => ResponseFuture::future(callback(
+                id.into_owned(),
+                params.into_owned(),
+                conn_id,
+                max_response_size,
+            )),
+            Self::Subscription(callback) => match subscribe() {
+                Ok((sink, state)) => ResponseFuture::future(callback(id, params, sink, state)),
+                Err(err) => ResponseFuture::ready(MethodResponse::error(id, err)),
+            },
+            Self::Unsubscription(callback) => {
+                ResponseFuture::ready(callback(id, params, conn_id, max_response_size))
+            }
+        }
+    }
 }
 
 impl Debug for MethodCallback {
@@ -268,29 +301,29 @@ impl Methods {
 
         let response = match self.method(&method) {
             None => MethodResponse::error(id, ErrorObject::from(ErrorCode::MethodNotFound)),
-            Some(MethodCallback::Sync(cb)) => (cb)(id, params, max_response_size),
-            Some(MethodCallback::Async(cb)) => {
-                (cb)(id.into_owned(), params.into_owned(), conn_id, max_response_size).await
-            }
-            Some(MethodCallback::Subscription(cb)) => {
-                let conn_state = SubscriptionState {
-                    conn_id,
-                    id_provider: &RandomIntegerIdProvider,
-                    subscription_permit,
+            Some(callback) => {
+                let subscribe = || {
+                    let conn_state = SubscriptionState {
+                        conn_id,
+                        id_provider: &RandomIntegerIdProvider,
+                        subscription_permit,
+                    };
+                    Ok((MethodSink::new(tx.clone()), conn_state))
                 };
-                let res = (cb)(id, params, MethodSink::new(tx.clone()), conn_state).await;
+                let res = callback.call(id, params, conn_id, max_response_size, subscribe).await;
 
-                // This message is not used because it's used for metrics so we discard in other to
-                // not read once this is used for subscriptions.
-                //
-                // The same information is part of `res` above.
-                let _ =
-                    rx.recv().await.expect("Every call must at least produce one response; qed");
+                if matches!(callback, MethodCallback::Subscription(_)) {
+                    // This message is not used because it's used for metrics so we discard in
+                    // other to not read once this is used for subscriptions.
+                    //
+                    // The same information is part of `res` above.
+                    let _ = rx
+                        .recv()
+                        .await
+                        .expect("Every call must at least produce one response; qed");
+                }
 
                 res
-            }
-            Some(MethodCallback::Unsubscription(cb)) => {
-                (cb)(id, params, conn_id, max_response_size)
             }
         };
 
@@ -597,27 +630,17 @@ impl<Context: Send + Sync + 'static> RpcModule<Context> {
             self.methods.verify_and_insert(
                 subscribe_method_name,
                 MethodCallback::Subscription(Arc::new(move |id, params, method_sink, conn| {
-                    let uniq_sub = SubscriptionKey {
-                        conn_id: conn.conn_id,
-                        sub_id: conn.id_provider.next_id(),
-                    };
-
-                    // response to the subscription call.
-                    let (tx, rx) = oneshot::channel();
+                    let (sink, rx) = PendingSubscriptionSink::new(
+                        &id,
+                        notif_method_name,
+                        method_sink.clone(),
+                        subscribers.clone(),
+                        conn,
+                    );
                     let (accepted_tx, accepted_rx) = oneshot::channel();
 
-                    let sub_id = uniq_sub.sub_id.clone();
+                    let sub_id = sink.uniq_sub.sub_id.clone();
                     let method = notif_method_name;
-
-                    let sink = PendingSubscriptionSink {
-                        inner: method_sink.clone(),
-                        method: notif_method_name,
-                        subscribers: subscribers.clone(),
-                        uniq_sub,
-                        id: id.clone().into_owned(),
-                        subscribe: tx,
-                        permit: conn.subscription_permit,
-                    };
 
                     // The subscription callback is a future from the subscription
                     // definition and not the as same when the subscription call has been
@@ -652,7 +675,7 @@ impl<Context: Send + Sync + 'static> RpcModule<Context> {
                         }
                     });
 
-                    let id = id.clone().into_owned();
+                    let id = id.into_owned();
 
                     Box::pin(async move {
                         match rx.await {
@@ -737,27 +760,17 @@ impl<Context: Send + Sync + 'static> RpcModule<Context> {
             self.methods.verify_and_insert(
                 subscribe_method_name,
                 MethodCallback::Subscription(Arc::new(move |id, params, method_sink, conn| {
-                    let uniq_sub = SubscriptionKey {
-                        conn_id: conn.conn_id,
-                        sub_id: conn.id_provider.next_id(),
-                    };
-
-                    // response to the subscription call.
-                    let (tx, rx) = oneshot::channel();
-
-                    let sink = PendingSubscriptionSink {
-                        inner: method_sink.clone(),
-                        method: notif_method_name,
-                        subscribers: subscribers.clone(),
-                        uniq_sub,
-                        id: id.clone().into_owned(),
-                        subscribe: tx,
-                        permit: conn.subscription_permit,
-                    };
+                    let (sink, rx) = PendingSubscriptionSink::new(
+                        &id,
+                        notif_method_name,
+                        method_sink,
+                        subscribers.clone(),
+                        conn,
+                    );
 
                     callback(params, sink, ctx.clone());
 
-                    let id = id.clone().into_owned();
+                    let id = id.into_owned();
 
                     Box::pin(async move {
                         match rx.await {

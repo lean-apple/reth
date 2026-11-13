@@ -107,66 +107,39 @@ impl RpcServiceT for RpcService {
             params.as_ref().map(|p| serde_json::value::RawValue::get(p)),
         );
 
-        let Some(method) = self.methods.method(&method) else {
+        let Some(callback) = self.methods.method(&method) else {
             return ResponseFuture::ready(MethodResponse::error(
                 id,
                 ErrorObject::from(ErrorCode::MethodNotFound),
             ));
         };
 
-        match method {
-            MethodCallback::Async(callback) => ResponseFuture::future((callback)(
-                id.into_owned(),
-                params.into_owned(),
-                conn_id,
-                max_response_body_size,
-            )),
-            MethodCallback::Sync(callback) => {
-                ResponseFuture::ready((callback)(id, params, max_response_body_size))
-            }
-            MethodCallback::Subscription(callback) => {
-                let Some(subscriptions) = &self.subscriptions else {
-                    tracing::debug!("Subscriptions not supported");
-                    return ResponseFuture::ready(MethodResponse::error(
-                        id,
-                        ErrorObject::from(ErrorCode::InternalError),
-                    ));
-                };
-
-                let Some(subscription_permit) = subscriptions.bounded.acquire() else {
-                    let max = subscriptions.bounded.max();
-                    return ResponseFuture::ready(MethodResponse::error(
-                        id,
-                        reject_too_many_subscriptions(max),
-                    ));
-                };
-
-                let conn_state = SubscriptionState {
-                    conn_id,
-                    id_provider: &*subscriptions.id_provider,
-                    subscription_permit,
-                };
-                ResponseFuture::future((callback)(
-                    id,
-                    params,
-                    subscriptions.sink.clone(),
-                    conn_state,
-                ))
-            }
-            MethodCallback::Unsubscription(callback) => {
-                // Don't adhere to any resource or subscription limits; always let unsubscribing
-                // happen!
-                if self.subscriptions.is_none() {
-                    tracing::debug!("Subscriptions not supported");
-                    return ResponseFuture::ready(MethodResponse::error(
-                        id,
-                        ErrorObject::from(ErrorCode::InternalError),
-                    ));
-                }
-
-                ResponseFuture::ready(callback(id, params, conn_id, max_response_body_size))
-            }
+        // Don't adhere to any resource or subscription limits; always let unsubscribing happen!
+        if self.subscriptions.is_none() && matches!(callback, MethodCallback::Unsubscription(_)) {
+            tracing::debug!("Subscriptions not supported");
+            return ResponseFuture::ready(MethodResponse::error(
+                id,
+                ErrorObject::from(ErrorCode::InternalError),
+            ));
         }
+
+        callback.call(id, params, conn_id, max_response_body_size, || {
+            let Some(subscriptions) = &self.subscriptions else {
+                tracing::debug!("Subscriptions not supported");
+                return Err(ErrorObject::from(ErrorCode::InternalError));
+            };
+
+            let Some(subscription_permit) = subscriptions.bounded.acquire() else {
+                return Err(reject_too_many_subscriptions(subscriptions.bounded.max()));
+            };
+
+            let conn_state = SubscriptionState {
+                conn_id,
+                id_provider: &*subscriptions.id_provider,
+                subscription_permit,
+            };
+            Ok((subscriptions.sink.clone(), conn_state))
+        })
     }
 
     fn batch<'a>(&self, batch: Batch<'a>) -> impl Future<Output = MethodResponse> + Send + 'a {
