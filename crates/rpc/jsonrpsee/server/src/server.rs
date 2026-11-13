@@ -78,7 +78,7 @@ use tokio::{
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{mpsc, watch, Notify, OwnedSemaphorePermit},
 };
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::{compat::TokioAsyncReadCompatExt, task::TaskTracker};
 use tower::{layer::util::Identity, Layer, Service, ServiceExt};
 use tracing::{instrument, Instrument};
 
@@ -154,7 +154,7 @@ where
         let stopped = stop_handle.clone().shutdown();
         tokio::pin!(stopped);
 
-        let (drop_on_completion, mut process_connection_awaiter) = mpsc::channel::<()>(1);
+        let connections = TaskTracker::new();
 
         loop {
             match try_accept_conn(&listener, stopped).await {
@@ -169,7 +169,7 @@ where
                         server_cfg: self.server_cfg.clone(),
                         conn_guard: &connection_guard,
                         socket,
-                        drop_on_completion: drop_on_completion.clone(),
+                        connections: &connections,
                     });
                     stopped = stop;
                 }
@@ -182,15 +182,10 @@ where
             }
         }
 
-        // Drop the last Sender
-        drop(drop_on_completion);
-
-        // Once this channel is closed it is safe to assume that all connections have been
-        // gracefully shutdown
-        while process_connection_awaiter.recv().await.is_some() {
-            // Generally, messages should not be sent across this channel,
-            // but we'll loop here to wait for `None` just to be on the safe side
-        }
+        // Once every connection task has finished it is safe to assume that all connections have
+        // been gracefully shutdown
+        connections.close();
+        connections.wait().await;
     }
 }
 
@@ -706,11 +701,6 @@ where
                     let sink =
                         MethodSink::new_with_limit(tx, this.server_cfg.max_response_body_size);
 
-                    // On each method call the `pending_calls` is cloned
-                    // then when all pending_calls are dropped
-                    // a graceful shutdown can occur.
-                    let (pending_calls, pending_calls_completed) = mpsc::channel::<()>(1);
-
                     let rpc_service = RpcService::new(
                         this.methods.clone(),
                         this.server_cfg.max_response_body_size as usize,
@@ -747,8 +737,6 @@ where
                                 rpc_service,
                                 sink,
                                 rx,
-                                pending_calls,
-                                pending_calls_completed,
                             };
 
                             ws::background_task(params).await;
@@ -803,7 +791,7 @@ struct ProcessConnection<'a, HttpMiddleware, RpcMiddleware> {
     server_cfg: ServerConfig,
     stop_handle: StopHandle,
     socket: TcpStream,
-    drop_on_completion: mpsc::Sender<()>,
+    connections: &'a TaskTracker,
     remote_addr: SocketAddr,
     methods: Methods,
 }
@@ -831,7 +819,7 @@ fn process_connection<RpcMiddleware, HttpMiddleware, Body>(
         server_cfg,
         socket,
         stop_handle,
-        drop_on_completion,
+        connections,
         methods,
         ..
     } = params;
@@ -887,10 +875,9 @@ fn process_connection<RpcMiddleware, HttpMiddleware, Body>(
         if let Err(e) = res {
             tracing::debug!(target: LOG_TARGET, "HTTP serve connection failed {:?}", e);
         }
-        drop(drop_on_completion)
     };
     // `#[instrument]` only spans this function, so the connection span is carried into the task.
-    tokio::spawn(serve.in_current_span());
+    connections.spawn(serve.in_current_span());
 }
 
 enum AcceptConnection<S> {

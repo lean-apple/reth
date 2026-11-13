@@ -31,7 +31,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
 };
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tower::{layer::util::Identity, Layer, Service};
 use tracing::{instrument, trace, warn, Instrument};
 
@@ -191,7 +191,7 @@ where
         let stopped = stop_handle.clone().shutdown();
         let mut stopped = pin!(stopped);
 
-        let (drop_on_completion, mut process_connection_awaiter) = mpsc::channel::<()>(1);
+        let connections = TaskTracker::new();
 
         trace!("accepting ipc connections");
         loop {
@@ -216,7 +216,7 @@ where
                         conn_id: ConnectionId::next_unique().0,
                         server_cfg: self.cfg.clone(),
                         stop_handle: stop_handle.clone(),
-                        drop_on_completion: drop_on_completion.clone(),
+                        connections: &connections,
                         methods: methods.clone(),
                         id_provider: self.id_provider.clone(),
                         local_socket_stream,
@@ -235,15 +235,10 @@ where
             }
         }
 
-        // Drop the last Sender
-        drop(drop_on_completion);
-
-        // Once this channel is closed it is safe to assume that all connections have been
-        // gracefully shutdown
-        while process_connection_awaiter.recv().await.is_some() {
-            // Generally, messages should not be sent across this channel,
-            // but we'll loop here to wait for `None` just to be on the safe side
-        }
+        // Once every connection task has finished it is safe to assume that all connections have
+        // been gracefully shutdown
+        connections.close();
+        connections.wait().await;
     }
 }
 
@@ -393,13 +388,13 @@ where
     }
 }
 
-struct ProcessConnection<RpcMiddleware> {
+struct ProcessConnection<'a, RpcMiddleware> {
     rpc_middleware: RpcServiceBuilder<RpcMiddleware>,
     conn_permit: Arc<ConnectionPermit>,
     conn_id: usize,
     server_cfg: Settings,
     stop_handle: StopHandle,
-    drop_on_completion: mpsc::Sender<()>,
+    connections: &'a TaskTracker,
     methods: Methods,
     id_provider: Arc<dyn IdProvider>,
     local_socket_stream: LocalSocketStream,
@@ -407,7 +402,7 @@ struct ProcessConnection<RpcMiddleware> {
 
 /// Spawns the IPC connection onto a new task
 #[instrument(name = "connection", skip_all, fields(conn_id = %params.conn_id), level = "TRACE")]
-fn process_connection<RpcMiddleware>(params: ProcessConnection<RpcMiddleware>)
+fn process_connection<RpcMiddleware>(params: ProcessConnection<'_, RpcMiddleware>)
 where
     RpcMiddleware: Layer<RpcService> + Send + 'static,
     RpcMiddleware::Service: RpcServiceT + Send + Sync + 'static,
@@ -418,7 +413,7 @@ where
         conn_id,
         server_cfg,
         stop_handle,
-        drop_on_completion,
+        connections,
         id_provider,
         methods,
         local_socket_stream,
@@ -446,13 +441,7 @@ where
     };
 
     // `#[instrument]` only spans this function, so the connection span is carried into the task.
-    tokio::spawn(
-        async {
-            to_ipc_service(ipc, service, stop_handle, rx).await;
-            drop(drop_on_completion)
-        }
-        .in_current_span(),
-    );
+    connections.spawn(to_ipc_service(ipc, service, stop_handle, rx).in_current_span());
 }
 
 async fn to_ipc_service<S, T>(

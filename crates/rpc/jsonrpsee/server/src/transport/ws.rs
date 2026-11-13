@@ -22,8 +22,7 @@ use tokio::{
     sync::{mpsc, oneshot, Semaphore},
     time::timeout,
 };
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::compat::Compat;
+use tokio_util::{compat::Compat, task::TaskTracker};
 
 pub(crate) type Sender = soketto::Sender<BufReader<BufWriter<Compat<TokioIo<Upgraded>>>>>;
 pub(crate) type Receiver = soketto::Receiver<BufReader<BufWriter<Compat<TokioIo<Upgraded>>>>>;
@@ -42,26 +41,14 @@ pub(crate) struct BackgroundTaskParams<S> {
     pub(crate) rpc_service: S,
     pub(crate) sink: MethodSink,
     pub(crate) rx: mpsc::Receiver<String>,
-    /// Held by every running call, so that a graceful shutdown can wait for them.
-    pub(crate) pending_calls: mpsc::Sender<()>,
-    pub(crate) pending_calls_completed: mpsc::Receiver<()>,
 }
 
 pub(crate) async fn background_task<S>(params: BackgroundTaskParams<S>)
 where
     S: RpcServiceT + Send + Sync + 'static,
 {
-    let BackgroundTaskParams {
-        server_cfg,
-        conn,
-        ws_sender,
-        ws_receiver,
-        rpc_service,
-        sink,
-        rx,
-        pending_calls,
-        pending_calls_completed,
-    } = params;
+    let BackgroundTaskParams { server_cfg, conn, ws_sender, ws_receiver, rpc_service, sink, rx } =
+        params;
     let ServerConfig {
         batch_requests_config,
         max_request_body_size,
@@ -100,6 +87,8 @@ where
     tokio::pin!(ws_stream);
 
     let call_permits = Arc::new(Semaphore::new(message_buffer_capacity as usize));
+    // Tracks every running call, so that a graceful shutdown can wait for them.
+    let pending_calls = TaskTracker::new();
 
     let result = loop {
         let receive = tokio::select! {
@@ -162,10 +151,8 @@ where
 
         let rpc_service = rpc_service.clone();
         let sink = sink.clone();
-        let pending_calls = pending_calls.clone();
 
-        tokio::spawn(async move {
-            let _pending_calls = pending_calls;
+        pending_calls.spawn(async move {
             let _permit = permit;
             let Some((data, is_single)) = classify_message(&data) else {
                 _ = sink.send_error(Id::Null, ErrorCode::ParseError.into()).await;
@@ -195,8 +182,8 @@ where
     // **NOTE** Do not return early in this function. This `await` needs to run to guarantee
     // proper drop behaviour.
     drop(rpc_service);
-    drop(pending_calls);
-    graceful_shutdown(result, pending_calls_completed, ws_stream, conn_tx, send_task_handle).await;
+    pending_calls.close();
+    graceful_shutdown(result, pending_calls, ws_stream, conn_tx, send_task_handle).await;
 
     drop(conn);
 }
@@ -307,17 +294,15 @@ pub(crate) enum Shutdown {
 /// executed.
 async fn graceful_shutdown<S>(
     result: Result<Shutdown, SokettoError>,
-    pending_calls: mpsc::Receiver<()>,
+    pending_calls: TaskTracker,
     ws_stream: S,
     mut conn_tx: oneshot::Sender<()>,
     send_task_handle: tokio::task::JoinHandle<()>,
 ) where
     S: StreamExt<Item = Result<Vec<u8>, SokettoError>> + Unpin,
 {
-    let pending_calls = ReceiverStream::new(pending_calls);
-
     if let Ok(Shutdown::Stopped) = result {
-        let graceful_shutdown = pending_calls.for_each(|_| async {});
+        let graceful_shutdown = pending_calls.wait();
         let disconnect = ws_stream.try_for_each(|_| async { Ok(()) });
 
         tokio::select! {
